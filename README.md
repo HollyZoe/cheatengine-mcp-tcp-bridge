@@ -96,48 +96,106 @@ TCP mode uses a Winsock FFI layer built directly into the CE Lua script — no e
 
 ---
 
+## Prerequisites
+
+| Requirement | Version | Notes |
+|-------------|---------|-------|
+| **Python** | 3.10+ | Required for the MCP server |
+| **Cheat Engine** | 7.5+ | 7.6 recommended; DBVM features require DBVM-enabled build |
+| **pip package `mcp`** | latest | `pip install mcp` |
+| **Git** | any | For cloning the repo |
+
+> [!NOTE]
+> `pywin32` is only required for legacy Named Pipe mode. TCP mode (default) has no additional Python dependencies beyond `mcp`.
+
+---
+
 ## Installation
+
+### Step 1: Clone the Repository
+
+```bash
+git clone https://github.com/HollyZoe/cheatengine-mcp-tcp-bridge.git
+cd cheatengine-mcp-tcp-bridge
+```
+
+### Step 2: Install Python Dependencies
 
 ```bash
 pip install -r MCP_Server/requirements.txt
 ```
-Or manually:
+
+Or install manually:
+
 ```bash
 pip install mcp
 ```
 
-> [!NOTE]
-> `pywin32` is only required for legacy Named Pipe mode. TCP mode (default) has no additional dependencies beyond `mcp`.
+> [!TIP]
+> Using a virtual environment is recommended:
+> ```bash
+> python -m venv venv
+> venv\Scripts\activate      # Windows
+> source venv/bin/activate   # Linux/macOS
+> pip install -r MCP_Server/requirements.txt
+> ```
 
 ---
 
 ## Quick Start
 
-### 1. Load Bridge in Cheat Engine
-1. Enable DBVM in Cheat Engine if you plan to use DBVM tools.
-2. Open Cheat Engine's Lua Engine or script executor.
-   - Preferred: `File` -> `Execute Script` -> open `MCP_Server/ce_mcp_bridge.lua` -> `Execute`.
-   - If your Cheat Engine build does not show `File` -> `Execute Script`, use `Table` -> `Show Cheat Table Lua Script`, paste the `dofile(...)` line below, and execute it:
+### Step 1: Attach a Process in Cheat Engine
+
+1. Open Cheat Engine.
+2. Click the **computer icon** (top-left) to open the process list.
+3. Select and attach to your target process (e.g., a game or application).
+4. *(Optional)* If you plan to use DBVM tools (hardware breakpoints, Ring -1 tracing), enable DBVM: `DBVM` → `Enable DBVM`.
+
+### Step 2: Load the MCP Bridge Script
+
+There are two ways to load the bridge:
+
+**Method A — Execute Script (Recommended)**
+1. In Cheat Engine: `File` → `Execute Script`
+2. Browse to and open `MCP_Server/ce_mcp_bridge.lua`
+3. Click `Execute`
+
+**Method B — Cheat Table Script (Fallback)**
+1. In Cheat Engine: `Table` → `Show Cheat Table Lua Script`
+2. Paste the following line (update the path to your actual location):
 
 ```lua
-dofile([[C:\path\to\cheatengine-mcp-bridge\MCP_Server\ce_mcp_bridge.lua]])
+dofile([[C:\path\to\cheatengine-mcp-tcp-bridge\MCP_Server\ce_mcp_bridge.lua]])
 ```
 
-Look for:
+3. Click `Execute`
+
+**Expected output in Cheat Engine's Lua output window:**
 ```
 [MCP v14.1.0] Starting MCP Bridge v14.1.0 [tcp]
+[MCP v14.1.0] Winsock initialized (version 2.2)
 [MCP v14.1.0] TCP Server listening on 0.0.0.0:17171
+[MCP v14.1.0] TCP: Waiting for client connection...
 ```
 
-### 2. Configure MCP Client
+> [!WARNING]
+> If you see `ERROR: cannot resolve kernel32 base functions`, your CE version may not support `getAddressSafe(name, true)`. Try updating Cheat Engine to 7.5+.
 
-**Cursor IDE** — add to `.cursor/mcp.json`:
+### Step 3: Configure Your AI Client
+
+Choose your AI client below and add the MCP server configuration.
+
+<details>
+<summary><b>Cursor IDE</b></summary>
+
+Add to your project's `.cursor/mcp.json` (or global `~/.cursor/mcp.json`):
+
 ```json
 {
   "mcpServers": {
     "cheatengine": {
       "command": "python",
-      "args": ["C:/path/to/MCP_Server/mcp_cheatengine.py"],
+      "args": ["C:/path/to/cheatengine-mcp-tcp-bridge/MCP_Server/mcp_cheatengine.py"],
       "env": {
         "CE_TRANSPORT": "tcp",
         "CE_HOST": "127.0.0.1",
@@ -148,16 +206,24 @@ Look for:
 }
 ```
 
-**Remote Cheat Engine** — change `CE_HOST` to the remote machine's IP:
+After saving, **restart Cursor** (or reload the MCP servers in settings) to apply the configuration.
+
+</details>
+
+<details>
+<summary><b>Claude Desktop</b></summary>
+
+Add to `%APPDATA%\Claude\claude_desktop_config.json` (Windows) or `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
+
 ```json
 {
   "mcpServers": {
     "cheatengine": {
       "command": "python",
-      "args": ["C:/path/to/MCP_Server/mcp_cheatengine.py"],
+      "args": ["C:/path/to/cheatengine-mcp-tcp-bridge/MCP_Server/mcp_cheatengine.py"],
       "env": {
         "CE_TRANSPORT": "tcp",
-        "CE_HOST": "192.168.1.100",
+        "CE_HOST": "127.0.0.1",
         "CE_PORT": "17171"
       }
     }
@@ -165,29 +231,82 @@ Look for:
 }
 ```
 
-**Codex** — add a TOML server block to `~/.codex/config.toml`:
+Restart Claude Desktop after saving.
+
+</details>
+
+<details>
+<summary><b>Codex CLI</b></summary>
+
+Add a TOML server block to `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.cheatengine]
 command = "python"
-args = ['C:\path\to\cheatengine-mcp-bridge\MCP_Server\mcp_cheatengine.py']
+args = ['C:\path\to\cheatengine-mcp-tcp-bridge\MCP_Server\mcp_cheatengine.py']
 ```
 
 Use single quotes for the Windows path so TOML treats backslashes literally.
 
-Restart the IDE to load the MCP server config.
+</details>
 
-### 3. Verify Connection
-Use the `ping` tool to verify connectivity:
+<details>
+<summary><b>Remote Cheat Engine (different machine)</b></summary>
+
+Change `CE_HOST` to the remote machine's IP address:
+
+```json
+{
+  "env": {
+    "CE_TRANSPORT": "tcp",
+    "CE_HOST": "192.168.1.100",
+    "CE_PORT": "17171"
+  }
+}
+```
+
+**Firewall setup on the CE machine:**
+
+```powershell
+# Windows Firewall — allow inbound TCP 17171
+netsh advfirewall firewall add rule name="CE MCP Bridge" dir=in action=allow protocol=TCP localport=17171
+
+# Linux (if applicable)
+sudo ufw allow 17171/tcp
+```
+
+> [!CAUTION]
+> The TCP bridge has **no authentication**. Only expose the port on trusted networks (VPN, LAN). Never open port 17171 to the public internet.
+
+</details>
+
+### Step 4: Verify the Connection
+
+In your AI chat, ask the AI to verify the connection. It will use the `ping` tool automatically:
+
+```
+You: "Ping the Cheat Engine bridge"
+```
+
+Expected response:
 ```json
 {"success": true, "version": "14.1.0", "message": "CE MCP Bridge v14.1.0 alive"}
 ```
 
-### 4. Start Asking Questions
+> [!TIP]
+> - `process_id: 0` in the ping response is **normal** — it means CE hasn't attached to a process yet, or the CE window is in idle state.
+> - If the connection fails, see [Troubleshooting](#troubleshooting) below.
+
+### Step 5: Start Using It
+
+Now you can talk to the AI and it will interact with the target process through Cheat Engine:
+
 ```
-"What process is attached?"
-"Read 16 bytes at the base address"
-"Disassemble the entry point"
+You: "What process is attached?"
+You: "Read 16 bytes at the base address of the main module"
+You: "Disassemble the entry point of the main module"
+You: "Scan for the integer value 99999"
+You: "What's the RTTI class name at [[game.exe+0x1234]+0x10]?"
 ```
 
 ---

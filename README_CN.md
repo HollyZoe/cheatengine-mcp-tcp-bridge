@@ -87,49 +87,106 @@ TCP 模式使用内建于 CE Lua 脚本的 Winsock FFI 层——Cheat Engine 端
 
 ---
 
+## 前置条件
+
+| 条件 | 版本 | 说明 |
+|------|------|------|
+| **Python** | 3.10+ | MCP 服务器运行所需 |
+| **Cheat Engine** | 7.5+ | 推荐 7.6；DBVM 功能需要 DBVM 版本的 CE |
+| **pip 包 `mcp`** | 最新版 | `pip install mcp` |
+| **Git** | 任意版本 | 用于克隆仓库 |
+
+> [!NOTE]
+> `pywin32` 仅在使用旧版命名管道（Pipe）模式时需要。TCP 模式（默认）除了 `mcp` 之外没有额外 Python 依赖。
+
+---
+
 ## 安装
+
+### 第一步：克隆仓库
+
+```bash
+git clone https://github.com/HollyZoe/cheatengine-mcp-tcp-bridge.git
+cd cheatengine-mcp-tcp-bridge
+```
+
+### 第二步：安装 Python 依赖
 
 ```bash
 pip install -r MCP_Server/requirements.txt
 ```
+
 或手动安装：
+
 ```bash
 pip install mcp
 ```
 
-> [!NOTE]
-> `pywin32` 仅在使用旧版命名管道模式时需要。TCP 模式（默认）除了 `mcp` 之外没有额外依赖。
+> [!TIP]
+> 建议使用虚拟环境：
+> ```bash
+> python -m venv venv
+> venv\Scripts\activate      # Windows
+> source venv/bin/activate   # Linux/macOS
+> pip install -r MCP_Server/requirements.txt
+> ```
 
 ---
 
 ## 快速开始
 
-### 1. 在 Cheat Engine 中加载 Bridge
+### 第一步：在 Cheat Engine 中附加目标进程
 
-1. 如需使用 DBVM 工具，请先在 Cheat Engine 中启用 DBVM。
-2. 打开 Cheat Engine 的 Lua 引擎或脚本执行器：
-   - 推荐：`File` -> `Execute Script` -> 打开 `MCP_Server/ce_mcp_bridge.lua` -> `Execute`
-   - 如果没有 `Execute Script` 选项，使用 `Table` -> `Show Cheat Table Lua Script`，粘贴以下代码并执行：
+1. 打开 Cheat Engine。
+2. 点击左上角的 **电脑图标** 打开进程列表。
+3. 选择并附加到你的目标进程（如游戏或应用程序）。
+4. *（可选）* 如需使用 DBVM 工具（硬件断点、Ring -1 追踪），请启用 DBVM：`DBVM` → `Enable DBVM`。
+
+### 第二步：加载 MCP Bridge 脚本
+
+有两种加载方式：
+
+**方式 A — Execute Script（推荐）**
+1. 在 Cheat Engine 中：`File` → `Execute Script`
+2. 浏览并打开 `MCP_Server/ce_mcp_bridge.lua`
+3. 点击 `Execute`
+
+**方式 B — Cheat Table Script（备选）**
+1. 在 Cheat Engine 中：`Table` → `Show Cheat Table Lua Script`
+2. 粘贴以下代码（将路径替换为你的实际路径）：
 
 ```lua
-dofile([[C:\path\to\cheatengine-mcp-bridge\MCP_Server\ce_mcp_bridge.lua]])
+dofile([[C:\path\to\cheatengine-mcp-tcp-bridge\MCP_Server\ce_mcp_bridge.lua]])
 ```
 
-看到以下输出表示启动成功：
+3. 点击 `Execute`
+
+**Cheat Engine 的 Lua 输出窗口中应显示：**
 ```
 [MCP v14.1.0] Starting MCP Bridge v14.1.0 [tcp]
+[MCP v14.1.0] Winsock initialized (version 2.2)
 [MCP v14.1.0] TCP Server listening on 0.0.0.0:17171
+[MCP v14.1.0] TCP: Waiting for client connection...
 ```
 
-### 2. 配置 MCP 客户端
+> [!WARNING]
+> 如果看到 `ERROR: cannot resolve kernel32 base functions`，你的 CE 版本可能不支持 `getAddressSafe(name, true)`。请尝试更新 Cheat Engine 到 7.5+。
 
-**Cursor IDE** — 在 `.cursor/mcp.json` 中添加：
+### 第三步：配置 AI 客户端
+
+选择你使用的 AI 客户端，添加 MCP 服务器配置。
+
+<details>
+<summary><b>Cursor IDE</b></summary>
+
+在项目目录的 `.cursor/mcp.json`（或全局 `~/.cursor/mcp.json`）中添加：
+
 ```json
 {
   "mcpServers": {
     "cheatengine": {
       "command": "python",
-      "args": ["C:/path/to/MCP_Server/mcp_cheatengine.py"],
+      "args": ["C:/path/to/cheatengine-mcp-tcp-bridge/MCP_Server/mcp_cheatengine.py"],
       "env": {
         "CE_TRANSPORT": "tcp",
         "CE_HOST": "127.0.0.1",
@@ -140,16 +197,24 @@ dofile([[C:\path\to\cheatengine-mcp-bridge\MCP_Server\ce_mcp_bridge.lua]])
 }
 ```
 
-**远程 Cheat Engine** — 将 `CE_HOST` 改为远程机器的 IP：
+保存后**重启 Cursor**（或在设置中重新加载 MCP 服务器）以应用配置。
+
+</details>
+
+<details>
+<summary><b>Claude Desktop</b></summary>
+
+在 `%APPDATA%\Claude\claude_desktop_config.json`（Windows）或 `~/Library/Application Support/Claude/claude_desktop_config.json`（macOS）中添加：
+
 ```json
 {
   "mcpServers": {
     "cheatengine": {
       "command": "python",
-      "args": ["C:/path/to/MCP_Server/mcp_cheatengine.py"],
+      "args": ["C:/path/to/cheatengine-mcp-tcp-bridge/MCP_Server/mcp_cheatengine.py"],
       "env": {
         "CE_TRANSPORT": "tcp",
-        "CE_HOST": "192.168.1.100",
+        "CE_HOST": "127.0.0.1",
         "CE_PORT": "17171"
       }
     }
@@ -157,29 +222,82 @@ dofile([[C:\path\to\cheatengine-mcp-bridge\MCP_Server\ce_mcp_bridge.lua]])
 }
 ```
 
-**Codex** — 在 `~/.codex/config.toml` 中添加：
+保存后重启 Claude Desktop。
+
+</details>
+
+<details>
+<summary><b>Codex CLI</b></summary>
+
+在 `~/.codex/config.toml` 中添加：
 
 ```toml
 [mcp_servers.cheatengine]
 command = "python"
-args = ['C:\path\to\cheatengine-mcp-bridge\MCP_Server\mcp_cheatengine.py']
+args = ['C:\path\to\cheatengine-mcp-tcp-bridge\MCP_Server\mcp_cheatengine.py']
 ```
 
-重启 IDE 以加载 MCP 服务器配置。
+Windows 路径使用单引号，TOML 会将反斜杠视为普通字符。
 
-### 3. 验证连接
+</details>
 
-使用 `ping` 工具验证连接：
+<details>
+<summary><b>远程 Cheat Engine（不同机器）</b></summary>
+
+将 `CE_HOST` 改为远程机器的 IP 地址：
+
+```json
+{
+  "env": {
+    "CE_TRANSPORT": "tcp",
+    "CE_HOST": "192.168.1.100",
+    "CE_PORT": "17171"
+  }
+}
+```
+
+**在 CE 所在机器上配置防火墙：**
+
+```powershell
+# Windows 防火墙 — 允许 TCP 17171 入站
+netsh advfirewall firewall add rule name="CE MCP Bridge" dir=in action=allow protocol=TCP localport=17171
+
+# Linux（如适用）
+sudo ufw allow 17171/tcp
+```
+
+> [!CAUTION]
+> TCP Bridge **没有身份验证**。仅在可信网络（VPN、局域网）中暴露该端口。绝不要将端口 17171 开放到公共互联网。
+
+</details>
+
+### 第四步：验证连接
+
+在 AI 对话框中，让 AI 验证连接。它会自动调用 `ping` 工具：
+
+```
+你："Ping 一下 Cheat Engine"
+```
+
+预期响应：
 ```json
 {"success": true, "version": "14.1.0", "message": "CE MCP Bridge v14.1.0 alive"}
 ```
 
-### 4. 开始提问
+> [!TIP]
+> - ping 响应中的 `process_id: 0` 是**正常的** — 表示 CE 尚未附加目标进程，或 CE 窗口处于空闲状态。
+> - 如果连接失败，请参考下方的 [故障排除](#故障排除) 章节。
+
+### 第五步：开始使用
+
+现在你可以与 AI 对话，它会通过 Cheat Engine 与目标进程交互：
 
 ```
-"当前附加了什么进程？"
-"读取基地址处的 16 个字节"
-"反汇编入口点"
+你："当前附加了什么进程？"
+你："读取主模块基地址处的 16 个字节"
+你："反汇编主模块的入口点"
+你："扫描整数值 99999"
+你："[[game.exe+0x1234]+0x10] 处的 RTTI 类名是什么？"
 ```
 
 ---
