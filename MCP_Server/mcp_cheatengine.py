@@ -92,16 +92,11 @@ import time
 import math
 import threading
 import traceback
+import socket as _socket
 
 try:
-    import win32file
-    import win32pipe
-    import win32con
-    import pywintypes
     from mcp.server.fastmcp import FastMCP
     
-    # CRITICAL: Also patch the reference inside the fastmcp module
-    # FastMCP already imported stdio_server before our patch, so we need to update its reference too
     if sys.platform == "win32":
         import mcp.server.fastmcp.server as fastmcp_server
         fastmcp_server.stdio_server = _patched_stdio_server
@@ -109,6 +104,16 @@ try:
 except ImportError as e:
     print(f"[MCP CE] Import Error: {e}", file=sys.stderr, flush=True)
     sys.exit(1)
+
+# pywin32 is optional — only needed for legacy Named Pipe transport
+try:
+    import win32file
+    import win32pipe
+    import win32con
+    import pywintypes
+    HAS_PYWIN32 = True
+except ImportError:
+    HAS_PYWIN32 = False
 
 # Restore stdout for MCP usage after imports are complete
 sys.stdout = _mcp_stdout
@@ -131,16 +136,20 @@ def format_result(result):
 # CONFIGURATION
 # ============================================================================
 
-# Bridge wire protocol endpoint
-PIPE_NAME = r"\\.\pipe\CE_MCP_Bridge_v99"
 MCP_SERVER_NAME = "cheatengine"
 MAX_RESPONSE_SIZE_BYTES = 32 * 1024 * 1024
+
+# Transport: "tcp" (default, works local+remote) or "pipe" (legacy, local-only)
+CE_TRANSPORT = os.environ.get("CE_TRANSPORT", "tcp").lower()
+CE_HOST = os.environ.get("CE_HOST", "127.0.0.1")
+CE_PORT = int(os.environ.get("CE_PORT", "17171"))
+PIPE_NAME = r"\\.\pipe\CE_MCP_Bridge_v99"
 
 
 def _parse_timeout_seconds(raw_value):
     """Parse CE_MCP_TIMEOUT seconds; <=0 disables timeout."""
     if raw_value is None:
-        return 30.0
+        return 90.0
     try:
         timeout = float(raw_value)
     except (TypeError, ValueError):
@@ -155,33 +164,242 @@ def _parse_timeout_seconds(raw_value):
 CE_MCP_TIMEOUT_SECONDS = _parse_timeout_seconds(os.environ.get("CE_MCP_TIMEOUT"))
 
 # ============================================================================
-# PIPE CLIENT
+# TCP BRIDGE CLIENT
 # ============================================================================
 
-class CEBridgeClient:
+CE_PORT_SCAN_RANGE = int(os.environ.get("CE_PORT_RANGE", "10"))
+
+
+class TCPBridgeClient:
+    """High-performance TCP client for CE MCP Bridge.
+    Works for both local (127.0.0.1) and remote connections.
+    Auto-scans port range if CE_PORT is occupied by another service."""
+
+    def __init__(self, host=CE_HOST, port=CE_PORT):
+        self.host = host
+        self.base_port = port
+        self.port = port
+        self.sock = None
+        self.timeout_seconds = CE_MCP_TIMEOUT_SECONDS
+        self._lock = threading.Lock()
+
+    def _try_connect(self, port):
+        """Attempt TCP connection to a specific port. Returns socket or None."""
+        try:
+            sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+            sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
+            sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE, 1)
+            sock.settimeout(0.5)
+            sock.connect((self.host, port))
+            sock.settimeout(None)
+            return sock
+        except (_socket.error, OSError):
+            try:
+                sock.close()
+            except Exception:
+                pass
+            return None
+
+    def _is_ce_bridge(self, sock):
+        """Send a ping to verify this is actually a CE MCP bridge."""
+        try:
+            ping_req = json.dumps({
+                "jsonrpc": "2.0", "method": "ping", "params": {}, "id": 1
+            }).encode('utf-8')
+            payload = struct.pack('<I', len(ping_req)) + ping_req
+            sock.settimeout(15.0)
+            sock.sendall(payload)
+            hdr = b''
+            while len(hdr) < 4:
+                chunk = sock.recv(4 - len(hdr))
+                if not chunk:
+                    return False
+                hdr += chunk
+            resp_len = struct.unpack('<I', hdr)[0]
+            if resp_len > 1024 * 1024:
+                return False
+            body = b''
+            while len(body) < resp_len:
+                chunk = sock.recv(resp_len - len(body))
+                if not chunk:
+                    return False
+                body += chunk
+            resp = json.loads(body.decode('utf-8'))
+            sock.settimeout(None)
+            return resp.get('result', {}).get('success', False)
+        except Exception:
+            return False
+
+    def connect(self):
+        # First try the configured / last known port
+        sock = self._try_connect(self.port)
+        if sock and self._is_ce_bridge(sock):
+            self.sock = sock
+            debug_log(f"TCP connected to {self.host}:{self.port}")
+            return True
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+        # Scan port range to find CE bridge
+        for offset in range(CE_PORT_SCAN_RANGE):
+            port = self.base_port + offset
+            if port == self.port:
+                continue
+            sock = self._try_connect(port)
+            if sock and self._is_ce_bridge(sock):
+                self.port = port
+                self.sock = sock
+                debug_log(f"TCP found CE bridge at {self.host}:{port}")
+                return True
+            if sock:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+        debug_log(f"TCP scan failed: no CE bridge on {self.host}:{self.base_port}-{self.base_port + CE_PORT_SCAN_RANGE - 1}")
+        return False
+
+    def _close_socket(self):
+        if self.sock:
+            try:
+                self.sock.shutdown(_socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+            self.sock = None
+
+    def _recv_exact(self, n):
+        """Receive exactly n bytes. Raises ConnectionError on failure."""
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = self.sock.recv(n - len(buf))
+            if not chunk:
+                raise ConnectionError("CE bridge closed the connection.")
+            buf.extend(chunk)
+        return bytes(buf)
+
+    def _exchange_once(self, req_json):
+        """Send one length-prefixed JSON-RPC request and receive one response."""
+        payload = struct.pack('<I', len(req_json)) + req_json
+        self.sock.sendall(payload)
+
+        resp_header = self._recv_exact(4)
+        resp_len = struct.unpack('<I', resp_header)[0]
+        if resp_len > MAX_RESPONSE_SIZE_BYTES:
+            raise ConnectionError(f"Response too large: {resp_len} bytes")
+
+        resp_body = self._recv_exact(resp_len)
+        try:
+            return json.loads(resp_body.decode('utf-8'))
+        except json.JSONDecodeError as exc:
+            raise ConnectionError("Invalid JSON from CE bridge") from exc
+
+    def _exchange_with_timeout(self, req_json, method):
+        timeout = self.timeout_seconds
+        if timeout is None:
+            return self._exchange_once(req_json)
+
+        result_box = {}
+        error_box = {}
+
+        def _worker():
+            try:
+                result_box["r"] = self._exchange_once(req_json)
+            except Exception as exc:
+                error_box["e"] = exc
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        t.join(timeout)
+
+        if t.is_alive():
+            self.close()
+            raise TimeoutError(f"'{method}' timed out after {timeout:g}s (CE_MCP_TIMEOUT).")
+        if "e" in error_box:
+            raise error_box["e"]
+        return result_box["r"]
+
+    def send_command(self, method, params=None):
+        max_retries = 3
+        last_error = None
+
+        for attempt in range(max_retries):
+            if not self.sock:
+                if not self.connect():
+                    if attempt < max_retries - 1:
+                        time.sleep(0.5)
+                        continue
+                    raise ConnectionError(
+                        f"Cannot connect to CE bridge at {self.host}:{self.port}. "
+                        "Ensure ce_mcp_bridge.lua is running in Cheat Engine."
+                    )
+
+            request = {
+                "jsonrpc": "2.0",
+                "method": method,
+                "params": params or {},
+                "id": int(time.time() * 1000)
+            }
+
+            try:
+                req_json = json.dumps(request).encode('utf-8')
+                with self._lock:
+                    response = self._exchange_with_timeout(req_json, method)
+
+                if 'error' in response:
+                    return {"success": False, "error": str(response['error'])}
+                return response.get('result', response)
+
+            except (ConnectionError, TimeoutError, OSError) as e:
+                self.close()
+                last_error = e
+                if attempt < max_retries - 1:
+                    time.sleep(0.3)
+                    continue
+
+        if last_error:
+            raise last_error
+        raise ConnectionError("Unknown communication error")
+
+    def close(self):
+        self._close_socket()
+
+
+# ============================================================================
+# LEGACY PIPE CLIENT (requires pywin32, local-only)
+# ============================================================================
+
+class PipeBridgeClient:
+    """Named Pipe client for backward compatibility (Windows local-only)."""
+
     def __init__(self):
+        if not HAS_PYWIN32:
+            raise ImportError(
+                "pywin32 is required for pipe transport. "
+                "Install it with: pip install pywin32>=306"
+            )
         self.handle = None
         self.timeout_seconds = CE_MCP_TIMEOUT_SECONDS
 
     def connect(self):
-        """Attempts to connect to the CE Named Pipe."""
         try:
             self.handle = win32file.CreateFile(
                 PIPE_NAME,
                 win32file.GENERIC_READ | win32file.GENERIC_WRITE,
-                0,
-                None,
-                win32file.OPEN_EXISTING,
-                0,
-                None
+                0, None, win32file.OPEN_EXISTING, 0, None
             )
             return True
-        except pywintypes.error as e:
-            # sys.stderr.write(f"[CEBridge] Connect Error: {e}\n")
+        except pywintypes.error:
             return False
 
     def _exchange_once(self, req_json):
-        """Send one framed request and parse one framed response."""
         header = struct.pack('<I', len(req_json))
         win32file.WriteFile(self.handle, header)
         win32file.WriteFile(self.handle, req_json)
@@ -198,47 +416,41 @@ class CEBridgeClient:
         try:
             return json.loads(resp_body_buffer.decode('utf-8'))
         except json.JSONDecodeError as exc:
-            raise ConnectionError("Invalid JSON received from CE") from exc
+            raise ConnectionError("Invalid JSON from CE") from exc
 
     def _exchange_with_timeout(self, req_json, method):
-        """Run exchange with optional CE_MCP_TIMEOUT enforcement."""
         timeout = self.timeout_seconds
         if timeout is None:
             return self._exchange_once(req_json)
 
-        result_holder = {}
-        error_holder = {}
+        result_box = {}
+        error_box = {}
 
         def _worker():
             try:
-                result_holder["response"] = self._exchange_once(req_json)
+                result_box["r"] = self._exchange_once(req_json)
             except Exception as exc:
-                error_holder["error"] = exc
+                error_box["e"] = exc
 
-        worker = threading.Thread(target=_worker, daemon=True)
-        worker.start()
-        worker.join(timeout)
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        t.join(timeout)
 
-        if worker.is_alive():
+        if t.is_alive():
             self.close()
-            raise TimeoutError(
-                f"Command '{method}' timed out after {timeout:g}s (CE_MCP_TIMEOUT)."
-            )
-
-        if "error" in error_holder:
-            raise error_holder["error"]
-
-        return result_holder["response"]
+            raise TimeoutError(f"'{method}' timed out after {timeout:g}s.")
+        if "e" in error_box:
+            raise error_box["e"]
+        return result_box["r"]
 
     def send_command(self, method, params=None):
-        """Send command to CE Bridge with auto-reconnection on failure."""
         max_retries = 2
         last_error = None
-        
+
         for attempt in range(max_retries):
             if not self.handle:
                 if not self.connect():
-                    raise ConnectionError("Cheat Engine Bridge (v12/v99) is not running (Pipe not found).")
+                    raise ConnectionError("CE Bridge pipe not found. Is ce_mcp_bridge.lua running?")
 
             request = {
                 "jsonrpc": "2.0",
@@ -246,28 +458,19 @@ class CEBridgeClient:
                 "params": params or {},
                 "id": int(time.time() * 1000)
             }
-            
+
             try:
                 req_json = json.dumps(request).encode('utf-8')
                 response = self._exchange_with_timeout(req_json, method)
-                
                 if 'error' in response:
                     return {"success": False, "error": str(response['error'])}
-                if 'result' in response:
-                    return response['result']
-                    
-                return response
-
+                return response.get('result', response)
             except (pywintypes.error, ConnectionError, TimeoutError) as e:
                 self.close()
-                if isinstance(e, pywintypes.error):
-                    last_error = ConnectionError(f"Pipe Communication failed: {e}")
-                else:
-                    last_error = e
+                last_error = ConnectionError(f"Pipe error: {e}") if isinstance(e, pywintypes.error) else e
                 if attempt < max_retries - 1:
-                    continue  # Retry
-        
-        # All retries failed
+                    continue
+
         if last_error:
             raise last_error
         raise ConnectionError("Unknown communication error")
@@ -276,14 +479,27 @@ class CEBridgeClient:
         if self.handle:
             try:
                 win32file.CloseHandle(self.handle)
-            except:
+            except Exception:
                 pass
             self.handle = None
 
-ce_client = CEBridgeClient()
 
 # ============================================================================
-# MCP SERVER - v12 IMPLEMENTATION
+# CLIENT FACTORY
+# ============================================================================
+
+def _create_client():
+    if CE_TRANSPORT == "pipe":
+        debug_log(f"Transport: Named Pipe ({PIPE_NAME})")
+        return PipeBridgeClient()
+    else:
+        debug_log(f"Transport: TCP ({CE_HOST}:{CE_PORT})")
+        return TCPBridgeClient(CE_HOST, CE_PORT)
+
+ce_client = _create_client()
+
+# ============================================================================
+# MCP SERVER - v13 IMPLEMENTATION
 # ============================================================================
 
 mcp = FastMCP(MCP_SERVER_NAME)

@@ -1,9 +1,15 @@
 -- ============================================================================
--- CHEATENGINE MCP BRIDGE v12.0.0
+-- CHEATENGINE MCP BRIDGE v13.0.0
 -- ============================================================================
 
 local PIPE_NAME = "CE_MCP_Bridge_v99"
-local VERSION = "12.0.0"
+local VERSION = "14.1.0"
+
+-- Transport: "tcp" (default) or "pipe" (legacy)
+local TRANSPORT = "tcp"
+local TCP_BASE_PORT = 17171
+local TCP_MAX_PORT = 17181
+local TCP_BIND = "0.0.0.0"
 
 -- Global State
 local serverState = {
@@ -15,8 +21,12 @@ local serverState = {
     scan_foundlist = nil,
     breakpoints = {},
     breakpoint_hits = {},
-    hw_bp_slots = {},      -- Hardware breakpoint slots (max 4)
-    active_watches = {}    -- DBVM watch IDs for hypervisor-level tracing
+    hw_bp_slots = {},
+    active_watches = {},
+    -- TCP state
+    serverSocket = nil,
+    clientSocket = nil,
+    tcpBuffers = {}
 }
 
 -- ============================================================================
@@ -5597,10 +5607,441 @@ local function executeCommand(jsonRequest)
 end
 
 -- ============================================================================
--- THREAD-BASED PIPE SERVER (NON-BLOCKING GUI)
+-- WINSOCK FFI — TCP SERVER VIA executeCodeLocalEx
 -- ============================================================================
--- Replaces v10 Timer architecture to prevent GUI Freezes.
--- I/O happens in Worker Thread. Execution happens in Main Thread.
+-- CE Lua has no native TCP sockets. We call ws2_32.dll functions directly
+-- using executeCodeLocalEx (runs in CE's own process address space).
+-- Memory for Winsock structures is allocated in CE's process via VirtualAlloc.
+
+local ws2 = {}
+local WS_READY = false
+
+-- kernel32 function addresses (same base across all processes in one boot session)
+local k32 = {}
+
+local function k32Init()
+    -- CRITICAL: use local=true (second arg) to resolve in CE's OWN process,
+    -- not the target (game) process. Anti-cheat may block target symbol resolution.
+    local function resolveLocal(name)
+        local addr = getAddressSafe(name, true)
+        if addr and addr ~= 0 then return addr end
+        addr = getAddressSafe(name)
+        if addr and addr ~= 0 then return addr end
+        return nil
+    end
+
+    k32.VirtualAlloc = resolveLocal("kernel32.VirtualAlloc")
+    k32.VirtualFree = resolveLocal("kernel32.VirtualFree")
+    k32.LoadLibraryA = resolveLocal("kernel32.LoadLibraryA")
+    k32.GetProcAddress = resolveLocal("kernel32.GetProcAddress")
+
+    log("  VirtualAlloc  = " .. tostring(k32.VirtualAlloc))
+    log("  VirtualFree   = " .. tostring(k32.VirtualFree))
+    log("  LoadLibraryA  = " .. tostring(k32.LoadLibraryA))
+    log("  GetProcAddress= " .. tostring(k32.GetProcAddress))
+
+    if not k32.VirtualAlloc or not k32.VirtualFree
+       or not k32.LoadLibraryA or not k32.GetProcAddress then
+        log("ERROR: cannot resolve kernel32 base functions")
+        return false
+    end
+    return true
+end
+
+local function localAlloc(size)
+    if not k32.VirtualAlloc then return 0 end
+    return executeCodeLocalEx(k32.VirtualAlloc, 0, size, 0x3000, 0x04)
+end
+
+local function localFree(addr)
+    if addr and addr ~= 0 and k32.VirtualFree then
+        executeCodeLocalEx(k32.VirtualFree, addr, 0, 0x8000)
+    end
+end
+
+local function localWriteStr(addr, str)
+    local len = #str
+    local CHUNK = 3800
+    for off = 0, len - 1, CHUNK do
+        local e = math.min(off + CHUNK, len)
+        local t = { string.byte(str, off + 1, e) }
+        writeBytesLocal(addr + off, table.unpack(t))
+    end
+end
+
+local function localReadStr(addr, len)
+    local parts = {}
+    local CHUNK = 4000
+    for off = 0, len - 1, CHUNK do
+        local n = math.min(CHUNK, len - off)
+        local bytes = readBytesLocal(addr + off, n, true)
+        if not bytes then return nil end
+        for i = 1, #bytes do
+            parts[#parts + 1] = string.char(bytes[i])
+        end
+    end
+    return table.concat(parts)
+end
+
+local function wsInit()
+    if WS_READY then return true end
+
+    if not k32Init() then return false end
+
+    -- Allocate a scratch buffer in CE's own process for string parameters
+    local scratch = localAlloc(4096)
+    if not scratch or scratch == 0 then
+        log("ERROR: localAlloc for scratch buffer failed")
+        return false
+    end
+
+    -- Load ws2_32.dll into CE's own process via LoadLibraryA
+    local dllName = "ws2_32.dll\0"
+    writeBytesLocal(scratch, string.byte(dllName, 1, #dllName))
+    local hWs2 = executeCodeLocalEx(k32.LoadLibraryA, scratch)
+    if not hWs2 or hWs2 == 0 then
+        log("ERROR: LoadLibraryA('ws2_32.dll') failed in CE process")
+        localFree(scratch)
+        return false
+    end
+    log("ws2_32.dll loaded in CE process at 0x" .. string.format("%X", hWs2))
+
+    -- Resolve each Winsock function via GetProcAddress in CE's process
+    local funcNames = {
+        "WSAStartup", "WSACleanup", "WSAGetLastError",
+        "socket", "bind", "listen", "accept", "closesocket",
+        "recv", "send", "setsockopt", "ioctlsocket", "shutdown", "select"
+    }
+    local nameOffset = 256
+    for _, name in ipairs(funcNames) do
+        local nameStr = name .. "\0"
+        writeBytesLocal(scratch + nameOffset, string.byte(nameStr, 1, #nameStr))
+        local addr = executeCodeLocalEx(k32.GetProcAddress, hWs2, scratch + nameOffset)
+        if not addr or addr == 0 then
+            log("ERROR: GetProcAddress failed for ws2_32." .. name)
+            localFree(scratch)
+            return false
+        end
+        ws2[name] = addr
+    end
+    localFree(scratch)
+
+    -- WSAStartup(0x0202, &wsadata)
+    local wsaBuf = localAlloc(512)
+    if not wsaBuf or wsaBuf == 0 then
+        log("ERROR: localAlloc for WSADATA failed")
+        return false
+    end
+    local rc = executeCodeLocalEx(ws2.WSAStartup, 0x0202, wsaBuf)
+    localFree(wsaBuf)
+    if rc ~= 0 then
+        log("ERROR: WSAStartup returned " .. tostring(rc))
+        return false
+    end
+
+    WS_READY = true
+    log("Winsock initialized — all " .. #funcNames .. " functions resolved")
+    return true
+end
+
+local function wsCleanup()
+    if WS_READY then
+        pcall(function() executeCodeLocalEx(ws2.WSACleanup) end)
+        WS_READY = false
+    end
+end
+
+local function htons(port)
+    return ((port & 0xFF) << 8) | ((port >> 8) & 0xFF)
+end
+
+local function tcpTryBind(sock, port)
+    local AF_INET = 2
+    local addr = localAlloc(16)
+    if not addr or addr == 0 then return false end
+
+    writeSmallIntegerLocal(addr, AF_INET)
+    writeSmallIntegerLocal(addr + 2, htons(port))
+    writeIntegerLocal(addr + 4, 0)
+    writeIntegerLocal(addr + 8, 0)
+    writeIntegerLocal(addr + 12, 0)
+
+    local rc = executeCodeLocalEx(ws2.bind, sock, addr, 16)
+    localFree(addr)
+    return rc == 0
+end
+
+local function tcpCreateServer()
+    local AF_INET, SOCK_STREAM, IPPROTO_TCP = 2, 1, 6
+
+    for port = TCP_BASE_PORT, TCP_MAX_PORT do
+        local sock = executeCodeLocalEx(ws2.socket, AF_INET, SOCK_STREAM, IPPROTO_TCP)
+        if sock == -1 or sock == 0 then
+            log("ERROR: socket() failed")
+            return nil, 0
+        end
+
+        -- SO_REUSEADDR — allows rebinding after server restart within same process
+        local raBuf = localAlloc(4)
+        writeIntegerLocal(raBuf, 1)
+        executeCodeLocalEx(ws2.setsockopt, sock, 0xFFFF, 0x0004, raBuf, 4)
+        localFree(raBuf)
+
+        -- TCP_NODELAY
+        local ndBuf = localAlloc(4)
+        writeIntegerLocal(ndBuf, 1)
+        executeCodeLocalEx(ws2.setsockopt, sock, 6, 1, ndBuf, 4)
+        localFree(ndBuf)
+
+        if tcpTryBind(sock, port) then
+            local rc = executeCodeLocalEx(ws2.listen, sock, 5)
+            if rc == 0 then
+                return sock, port
+            end
+            log("listen() failed on port " .. port)
+        else
+            log("Port " .. port .. " in use, trying next...")
+        end
+
+        executeCodeLocalEx(ws2.closesocket, sock)
+    end
+
+    log("ERROR: no available port in range " .. TCP_BASE_PORT .. "-" .. TCP_MAX_PORT)
+    return nil, 0
+end
+
+local function tcpClose(sock)
+    if sock and sock ~= 0 and sock ~= -1 then
+        pcall(function()
+            executeCodeLocalEx(ws2.shutdown, sock, 2)
+        end)
+        pcall(function()
+            executeCodeLocalEx(ws2.closesocket, sock)
+        end)
+    end
+end
+
+local function tcpSetRecvTimeout(sock, ms)
+    local buf = localAlloc(4)
+    writeIntegerLocal(buf, ms)
+    executeCodeLocalEx(ws2.setsockopt, sock, 0xFFFF, 0x1006, buf, 4)
+    localFree(buf)
+end
+
+local function tcpRecvExact(sock, size)
+    local buf = localAlloc(size)
+    if not buf or buf == 0 then return nil end
+
+    local total = 0
+    local retries = 0
+    local MAX_RETRIES = 200
+
+    while total < size do
+        local n = executeCodeLocalEx(ws2.recv, sock, buf + total, size - total, 0)
+        if n > 0 then
+            total = total + n
+            retries = 0
+        elseif n == 0 then
+            localFree(buf)
+            return nil
+        else
+            retries = retries + 1
+            if retries >= MAX_RETRIES then
+                localFree(buf)
+                return nil
+            end
+            sleep(50)
+        end
+    end
+
+    local data = localReadStr(buf, size)
+    localFree(buf)
+    return data
+end
+
+local function tcpSendAll(sock, data)
+    local len = #data
+    local buf = localAlloc(len)
+    if not buf or buf == 0 then return false end
+    localWriteStr(buf, data)
+
+    local total = 0
+    while total < len do
+        local n = executeCodeLocalEx(ws2.send, sock, buf + total, len - total, 0)
+        if n <= 0 then
+            localFree(buf)
+            return false
+        end
+        total = total + n
+    end
+    localFree(buf)
+    return true
+end
+
+local function tcpRecvFrame(sock)
+    local hdr = tcpRecvExact(sock, 4)
+    if not hdr or #hdr < 4 then return nil end
+
+    local b = { string.byte(hdr, 1, 4) }
+    local msgLen = b[1] + (b[2] * 256) + (b[3] * 65536) + (b[4] * 16777216)
+    if msgLen <= 0 or msgLen > 32 * 1024 * 1024 then return nil end
+
+    return tcpRecvExact(sock, msgLen)
+end
+
+local function tcpSendFrame(sock, data)
+    local len = #data
+    local hdr = string.char(
+        len % 256,
+        math.floor(len / 256) % 256,
+        math.floor(len / 65536) % 256,
+        math.floor(len / 16777216) % 256
+    )
+    if not tcpSendAll(sock, hdr) then return false end
+    return tcpSendAll(sock, data)
+end
+
+-- ============================================================================
+-- TCP SERVER WORKER THREAD
+-- ============================================================================
+
+local function TCPWorker(thread)
+    log("TCP Worker starting...")
+
+    if not wsInit() then
+        log("FATAL: Winsock init failed — falling back to pipe")
+        return
+    end
+
+    while not thread.Terminated do
+        local serverSock, boundPort = tcpCreateServer()
+        if not serverSock then
+            log("ERROR: could not create TCP server, retrying in 3s...")
+            sleep(3000)
+            if thread.Terminated then break end
+            goto continue_outer
+        end
+
+        serverState.serverSocket = serverSock
+        serverState.tcpPort = boundPort
+        log("TCP Server listening on 0.0.0.0:" .. boundPort)
+
+        -- Allocate persistent buffers for select() loop
+        local fdsetBuf = localAlloc(128)   -- fd_set: u_int count + SOCKET[1]
+        local tvBuf    = localAlloc(8)     -- timeval: tv_sec(4) + tv_usec(4)
+        local addrBuf  = localAlloc(64)    -- sockaddr_in for accept
+        local addrLenBuf = localAlloc(4)   -- addrlen for accept
+
+        log("Entering select+accept loop...")
+        while not thread.Terminated do
+            -- Prepare fd_set {fd_count=1, fd_array[0]=serverSock}
+            -- Winsock uses #pragma pack(4): fd_count(4) + fd_array[0](8) at offset 4
+            writeIntegerLocal(fdsetBuf, 1)
+            writeIntegerLocal(fdsetBuf + 4, serverSock & 0xFFFFFFFF)
+            writeIntegerLocal(fdsetBuf + 8, (serverSock >> 32) & 0xFFFFFFFF)
+
+            -- Prepare timeval {tv_sec=1, tv_usec=0}
+            writeIntegerLocal(tvBuf, 1)
+            writeIntegerLocal(tvBuf + 4, 0)
+
+            -- select(0, &readfds, NULL, NULL, &timeout) — 1s timeout
+            local selRet = executeCodeLocalEx(ws2.select, 0, fdsetBuf, 0, 0, tvBuf)
+
+            if selRet > 0 then
+                -- Connection pending — call accept with proper addr buffers
+                writeIntegerLocal(addrLenBuf, 64)
+                local clientSock = executeCodeLocalEx(ws2.accept, serverSock, addrBuf, addrLenBuf)
+                if clientSock == -1 or clientSock == 0xFFFFFFFFFFFFFFFF then
+                    log("WARN: select said ready but accept returned INVALID_SOCKET")
+                    sleep(100)
+                else
+                    log("accept() returned socket: " .. tostring(clientSock))
+                    log("TCP Client connected")
+                    serverState.connected = true
+                    serverState.clientSocket = clientSock
+
+                    -- TCP_NODELAY on client
+                    local ndBuf = localAlloc(4)
+                    writeIntegerLocal(ndBuf, 1)
+                    executeCodeLocalEx(ws2.setsockopt, clientSock, 6, 1, ndBuf, 4)
+                    localFree(ndBuf)
+
+                    -- Recv timeout (2000ms) for interruptibility
+                    tcpSetRecvTimeout(clientSock, 2000)
+
+                    -- Reuse the persistent buffers for client select() loop
+                    log("Entering recv loop (select-driven)...")
+                    while not thread.Terminated do
+                        -- select() on clientSock with 5s timeout to detect data or disconnect
+                        writeIntegerLocal(fdsetBuf, 1)
+                        writeIntegerLocal(fdsetBuf + 4, clientSock & 0xFFFFFFFF)
+                        writeIntegerLocal(fdsetBuf + 8, (clientSock >> 32) & 0xFFFFFFFF)
+                        writeIntegerLocal(tvBuf, 5)
+                        writeIntegerLocal(tvBuf + 4, 0)
+
+                        local selRet = executeCodeLocalEx(ws2.select, 0, fdsetBuf, 0, 0, tvBuf)
+
+                        if selRet > 0 then
+                            local payload = tcpRecvFrame(clientSock)
+                            if not payload then
+                                log("recv returned nil — client disconnected")
+                                break
+                            end
+
+                            log("Received " .. #payload .. " bytes, processing...")
+                            local response = nil
+                            thread.synchronize(function()
+                                response = executeCommand(payload)
+                            end)
+
+                            if response then
+                                log("Sending " .. #response .. " bytes response")
+                                if not tcpSendFrame(clientSock, response) then
+                                    break
+                                end
+                            end
+                        elseif selRet < 0 then
+                            log("select() error on client socket, disconnecting")
+                            break
+                        end
+                        -- selRet == 0: timeout, connection alive but idle — continue loop
+                    end
+
+                    serverState.connected = false
+                    serverState.clientSocket = nil
+                    tcpClose(clientSock)
+                    log("TCP Client disconnected")
+                end
+            elseif selRet < 0 then
+                log("WARN: select() returned " .. tostring(selRet) .. ", restarting server...")
+                break
+            end
+        end
+
+        -- Free persistent buffers
+        pcall(function() localFree(fdsetBuf) end)
+        pcall(function() localFree(tvBuf) end)
+        pcall(function() localFree(addrBuf) end)
+        pcall(function() localFree(addrLenBuf) end)
+
+        serverState.serverSocket = nil
+        tcpClose(serverSock)
+
+        if not thread.Terminated then
+            log("TCP Server restarting in 1s...")
+            sleep(1000)
+        end
+
+        ::continue_outer::
+    end
+
+    wsCleanup()
+    log("TCP Worker terminated")
+end
+
+-- ============================================================================
+-- THREAD-BASED PIPE SERVER (LEGACY, NON-BLOCKING GUI)
+-- ============================================================================
 
 local function PipeWorker(thread)
     log("Worker Thread Started - Waiting for connection...")
@@ -5648,8 +6089,6 @@ local function PipeWorker(thread)
                         local payload = pipe.readString(len)
                         
                         if payload then
-                            -- CRITICAL: EXECUTE ON MAIN THREAD
-                            -- We pause the worker and run logic on GUI thread to be safe
                             local response = nil
                             thread.synchronize(function()
                                 response = executeCommand(payload)
@@ -5706,46 +6145,61 @@ end
 function StopMCPBridge()
     if serverState.workerThread then
         log("Stopping Server (Terminating Thread)...")
+
+        -- TCP: close sockets FIRST to unblock any blocking calls, THEN terminate thread
+        if serverState.clientSocket then
+            pcall(function() tcpClose(serverState.clientSocket) end)
+            serverState.clientSocket = nil
+        end
+        if serverState.serverSocket then
+            pcall(function() tcpClose(serverState.serverSocket) end)
+            serverState.serverSocket = nil
+        end
+
         serverState.workerThread.terminate()
-        
-        -- Force destroy the pipe if it's currently blocking on acceptConnection or read
+        sleep(100)
+
+        -- Pipe: force destroy to unblock acceptConnection/read
         if serverState.workerPipe then
             pcall(function() serverState.workerPipe.destroy() end)
             serverState.workerPipe = nil
         end
-        
+
         serverState.workerThread = nil
         serverState.running = false
+        serverState.connected = false
     end
-    
+
     if serverState.timer then
         serverState.timer.destroy()
         serverState.timer = nil
     end
-    
-    -- CRITICAL: Cleanup all zombie resources (breakpoints, DBVM watches, scans)
+
     cleanupZombieState()
-    
     log("Server Stopped")
 end
 
 function StartMCPBridge()
-    StopMCPBridge()  -- This now also calls cleanupZombieState()
-    
-    -- Update Global State
-    log("Starting MCP Bridge v" .. VERSION)
-    
+    StopMCPBridge()
+
+    log("Starting MCP Bridge v" .. VERSION .. " [" .. TRANSPORT .. "]")
+
     serverState.running = true
     serverState.connected = false
-    
-    -- Create the Worker Thread
-    serverState.workerThread = createThread(PipeWorker)
-    
-    log("===========================================")
-    log("MCP Server Listening on: " .. PIPE_NAME)
-    log("Architecture: Threaded I/O + Synchronized Execution")
-    log("Cleanup: Zombie Prevention Active")
-    log("===========================================")
+
+    if TRANSPORT == "tcp" then
+        serverState.workerThread = createThread(TCPWorker)
+        log("===========================================")
+        log("MCP Server: TCP port range " .. TCP_BASE_PORT .. "-" .. TCP_MAX_PORT)
+        log("Architecture: Winsock FFI + Synchronized Execution")
+        log("===========================================")
+    else
+        serverState.workerThread = createThread(PipeWorker)
+        log("===========================================")
+        log("MCP Server: Pipe " .. PIPE_NAME)
+        log("Architecture: Threaded I/O + Synchronized Execution")
+        log("===========================================")
+    end
 end
 
 -- Auto-start
