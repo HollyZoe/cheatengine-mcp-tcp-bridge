@@ -5648,20 +5648,137 @@ local WS_READY = false
 -- kernel32 function addresses (same base across all processes in one boot session)
 local k32 = {}
 
-local function k32Init()
-    -- CRITICAL: use local=true (second arg) to resolve in CE's OWN process,
-    -- not the target (game) process. Anti-cheat may block target symbol resolution.
-    local function resolveLocal(name)
-        local addr = getAddressSafe(name, true)
-        if addr and addr ~= 0 then return addr end
-        addr = getAddressSafe(name)
-        if addr and addr ~= 0 then return addr end
+local function readU32Local(addr)
+    local b = readBytesLocal(addr, 4, true)
+    if not b or #b < 4 then return 0 end
+    return b[1] + b[2]*0x100 + b[3]*0x10000 + b[4]*0x1000000
+end
+
+local function readU64Local(addr)
+    local lo = readU32Local(addr)
+    local hi = readU32Local(addr + 4)
+    return lo + hi * 0x100000000
+end
+
+local function readU16Local(addr)
+    local b = readBytesLocal(addr, 2, true)
+    if not b or #b < 2 then return 0 end
+    return b[1] + b[2]*0x100
+end
+
+local function readASCIILocal(addr, maxLen)
+    local b = readBytesLocal(addr, maxLen, true)
+    if not b then return "" end
+    local s = {}
+    for i = 1, #b do
+        if b[i] == 0 then break end
+        s[#s+1] = string.char(b[i])
+    end
+    return table.concat(s)
+end
+
+local function k32InitViaPEB()
+    log("  Trying PEB-walk fallback to find kernel32...")
+
+    local pebAsm = "mov rax, gs:[60h]\nret"
+    local ok, peb = pcall(executeCodeLocal, pebAsm)
+    if not ok or not peb or peb == 0 then
+        log("  PEB fallback: executeCodeLocal failed")
+        return false
+    end
+    log("  PEB address = " .. string.format("0x%X", peb))
+
+    local ldr = readU64Local(peb + 0x18)
+    if ldr == 0 then log("  PEB fallback: LDR is null"); return false end
+
+    local listHead = ldr + 0x20
+    local entry = readU64Local(listHead)
+    local k32Base = nil
+
+    for attempt = 1, 30 do
+        if entry == 0 or entry == listHead then break end
+
+        local dllBase = readU64Local(entry + 0x20)
+        local nameLen = readU16Local(entry + 0x48)
+        local namePtr = readU64Local(entry + 0x50)
+
+        if nameLen > 0 and namePtr ~= 0 and dllBase ~= 0 then
+            local wideBytes = readBytesLocal(namePtr, nameLen, true)
+            if wideBytes then
+                local name = {}
+                for i = 1, #wideBytes, 2 do
+                    if wideBytes[i] ~= 0 then
+                        name[#name+1] = string.char(wideBytes[i])
+                    end
+                end
+                local dllName = table.concat(name):lower()
+                if dllName == "kernel32.dll" then
+                    k32Base = dllBase
+                    break
+                end
+            end
+        end
+        entry = readU64Local(entry)
+    end
+
+    if not k32Base or k32Base == 0 then
+        log("  PEB fallback: kernel32.dll not found in module list")
+        return false
+    end
+    log("  kernel32.dll base = " .. string.format("0x%X", k32Base))
+
+    local mz = readU16Local(k32Base)
+    if mz ~= 0x5A4D then
+        log("  PEB fallback: invalid PE signature at kernel32 base")
+        return false
+    end
+
+    local peOff = readU32Local(k32Base + 0x3C)
+    local exportRVA = readU32Local(k32Base + peOff + 0x88)
+    if exportRVA == 0 then
+        log("  PEB fallback: no export directory in kernel32")
+        return false
+    end
+    local exportDir = k32Base + exportRVA
+    local numNames = readU32Local(exportDir + 0x18)
+    local addrOfFuncs = k32Base + readU32Local(exportDir + 0x1C)
+    local addrOfNames = k32Base + readU32Local(exportDir + 0x20)
+    local addrOfOrds  = k32Base + readU32Local(exportDir + 0x24)
+
+    local function findExport(funcName)
+        for i = 0, numNames - 1 do
+            local nameRVA = readU32Local(addrOfNames + i * 4)
+            local name = readASCIILocal(k32Base + nameRVA, #funcName + 1)
+            if name == funcName then
+                local ordinal = readU16Local(addrOfOrds + i * 2)
+                local funcRVA = readU32Local(addrOfFuncs + ordinal * 4)
+                return k32Base + funcRVA
+            end
+        end
         return nil
     end
 
-    k32.VirtualAlloc = resolveLocal("kernel32.VirtualAlloc")
-    k32.VirtualFree = resolveLocal("kernel32.VirtualFree")
-    k32.LoadLibraryA = resolveLocal("kernel32.LoadLibraryA")
+    k32.VirtualAlloc  = findExport("VirtualAlloc")
+    k32.VirtualFree   = findExport("VirtualFree")
+    k32.LoadLibraryA  = findExport("LoadLibraryA")
+    k32.GetProcAddress = findExport("GetProcAddress")
+
+    return k32.VirtualAlloc ~= nil and k32.VirtualFree ~= nil
+       and k32.LoadLibraryA ~= nil and k32.GetProcAddress ~= nil
+end
+
+local function k32Init()
+    local function resolveLocal(name)
+        local ok, addr = pcall(getAddressSafe, name, true)
+        if ok and addr and addr ~= 0 then return addr end
+        ok, addr = pcall(getAddressSafe, name)
+        if ok and addr and addr ~= 0 then return addr end
+        return nil
+    end
+
+    k32.VirtualAlloc  = resolveLocal("kernel32.VirtualAlloc")
+    k32.VirtualFree   = resolveLocal("kernel32.VirtualFree")
+    k32.LoadLibraryA  = resolveLocal("kernel32.LoadLibraryA")
     k32.GetProcAddress = resolveLocal("kernel32.GetProcAddress")
 
     log("  VirtualAlloc  = " .. tostring(k32.VirtualAlloc))
@@ -5671,7 +5788,16 @@ local function k32Init()
 
     if not k32.VirtualAlloc or not k32.VirtualFree
        or not k32.LoadLibraryA or not k32.GetProcAddress then
-        log("ERROR: cannot resolve kernel32 base functions")
+        log("  getAddressSafe failed, trying PEB-walk fallback...")
+        if k32InitViaPEB() then
+            log("  PEB fallback succeeded!")
+            log("  VirtualAlloc  = " .. string.format("0x%X", k32.VirtualAlloc))
+            log("  VirtualFree   = " .. string.format("0x%X", k32.VirtualFree))
+            log("  LoadLibraryA  = " .. string.format("0x%X", k32.LoadLibraryA))
+            log("  GetProcAddress= " .. string.format("0x%X", k32.GetProcAddress))
+            return true
+        end
+        log("ERROR: cannot resolve kernel32 base functions (both methods failed)")
         return false
     end
     return true
