@@ -5677,29 +5677,36 @@ local function tryLoadNativeDLL()
 end
 
 -- ============================================================================
--- MAIN-THREAD POLL LOOP (1ms timer, checks flag only)
+-- POLL LOOP: main thread checks flag, CE thread executes command
 -- ============================================================================
 
 local nativePollTimer = nil
+local workerBusy = false
 
 local function NativePollLoop()
+    if workerBusy then return end
+
     local cmd = mcp_tcp_poll()
     if not cmd then return end
 
-    local response = nil
-    local ok, err = pcall(function()
-        response = executeCommand(cmd)
+    workerBusy = true
+    createThread(function(thread)
+        local response = nil
+        local ok, err = pcall(function()
+            response = executeCommand(cmd)
+        end)
+        if not ok then
+            response = json.encode({
+                jsonrpc = "2.0",
+                error = { code = -32603, message = "Internal error: " .. tostring(err) },
+                id = nil
+            })
+        end
+        if response then
+            pcall(mcp_tcp_respond, response)
+        end
+        workerBusy = false
     end)
-    if not ok then
-        response = json.encode({
-            jsonrpc = "2.0",
-            error = { code = -32603, message = "Internal error: " .. tostring(err) },
-            id = nil
-        })
-    end
-    if response then
-        pcall(mcp_tcp_respond, response)
-    end
 end
 
 -- ============================================================================
