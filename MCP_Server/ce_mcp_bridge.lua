@@ -5677,13 +5677,18 @@ local function tryLoadNativeDLL()
 end
 
 -- ============================================================================
--- THREADED EXECUTION HANDLER (called by DLL TCP thread via pcall)
+-- MAIN-THREAD POLL LOOP (1ms timer, checks flag only)
 -- ============================================================================
 
-function MCP_NativeExecute(cmdJson)
+local nativePollTimer = nil
+
+local function NativePollLoop()
+    local cmd = mcp_tcp_poll()
+    if not cmd then return end
+
     local response = nil
     local ok, err = pcall(function()
-        response = executeCommand(cmdJson)
+        response = executeCommand(cmd)
     end)
     if not ok then
         response = json.encode({
@@ -5692,7 +5697,9 @@ function MCP_NativeExecute(cmdJson)
             id = nil
         })
     end
-    return response or ""
+    if response then
+        pcall(mcp_tcp_respond, response)
+    end
 end
 
 -- ============================================================================
@@ -5700,6 +5707,11 @@ end
 -- ============================================================================
 
 function StopMCPBridge()
+    if nativePollTimer then
+        nativePollTimer.Enabled = false
+        nativePollTimer.destroy()
+        nativePollTimer = nil
+    end
     if NATIVE_DLL_LOADED and type(mcp_tcp_stop) == "function" then
         pcall(mcp_tcp_stop)
     end
@@ -5729,20 +5741,12 @@ function StartMCPBridge()
     end
     serverState.tcpPort = result.port
 
-    if type(mcp_tcp_set_threaded) ~= "function" then
-        print("[MCP] FATAL: DLL too old, mcp_tcp_set_threaded not available")
-        pcall(mcp_tcp_stop)
-        return
-    end
+    nativePollTimer = createTimer(nil, false)
+    nativePollTimer.Interval = 1
+    nativePollTimer.OnTimer = NativePollLoop
+    nativePollTimer.Enabled = true
 
-    local tr = mcp_tcp_set_threaded(1)
-    if not tr or not tr.ok or not tr.threaded then
-        print("[MCP] ERROR: Failed to enable threaded mode")
-        pcall(mcp_tcp_stop)
-        return
-    end
-
-    print("[MCP] Bridge started on port " .. result.port .. " (THREADED mode - UI thread free)")
+    print("[MCP] Bridge started on port " .. result.port .. " (native TCP, 1ms poll)")
 end
 
 -- Auto-start
