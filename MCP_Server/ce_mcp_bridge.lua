@@ -6297,11 +6297,114 @@ end
 -- MAIN CONTROL
 -- ============================================================================
 
+-- ============================================================================
+-- NATIVE DLL TCP MODE
+-- ============================================================================
+
+local NATIVE_DLL_LOADED = false
+local nativePollTimer = nil
+
+local function tryLoadNativeDLL()
+    local scriptDir = nil
+    pcall(function()
+        local info = debug.getinfo(1, "S")
+        if info and info.source then
+            local src = info.source:gsub("^@", "")
+            scriptDir = src:match("(.+)[/\\]")
+        end
+    end)
+
+    local candidates = {}
+    if scriptDir then
+        table.insert(candidates, scriptDir .. "\\ce_mcp_tcp.dll")
+        table.insert(candidates, scriptDir .. "\\..\\NativeBridge\\bin\\x64\\ce_mcp_tcp.dll")
+        table.insert(candidates, scriptDir .. "\\..\\NativeBridge\\bin\\x86\\ce_mcp_tcp.dll")
+    end
+    table.insert(candidates, "ce_mcp_tcp.dll")
+
+    for _, path in ipairs(candidates) do
+        local ok, loader = pcall(package.loadlib, path, "luaopen_ce_mcp_tcp")
+        if ok and loader then
+            local ok2, info = pcall(loader)
+            if ok2 then
+                log("Native DLL loaded: " .. path)
+                NATIVE_DLL_LOADED = true
+                return true
+            else
+                log("WARN: DLL init failed: " .. tostring(info))
+            end
+        end
+    end
+    return false
+end
+
+local function NativeTCPPollLoop()
+    if not NATIVE_DLL_LOADED then return end
+
+    local cmd = mcp_tcp_poll()
+    if cmd then
+        local response = nil
+        local ok, err = pcall(function()
+            response = executeCommand(cmd)
+        end)
+        if not ok then
+            response = json.encode({
+                jsonrpc = "2.0",
+                error = { code = -32603, message = "Internal error: " .. tostring(err) },
+                id = nil
+            })
+        end
+        if response then
+            pcall(mcp_tcp_respond, response)
+        end
+    end
+end
+
+local function StartNativeTCP()
+    if nativePollTimer then
+        nativePollTimer.destroy()
+        nativePollTimer = nil
+    end
+    pcall(function() mcp_tcp_stop() end)
+
+    local result = mcp_tcp_start(TCP_BASE_PORT, TCP_BIND)
+    if not result or not result.ok then
+        log("ERROR: Native TCP start failed: " .. tostring(result and result.err or "unknown"))
+        return false
+    end
+
+    log("Native TCP Server listening on " .. TCP_BIND .. ":" .. result.port)
+
+    nativePollTimer = createTimer(nil, false)
+    nativePollTimer.Interval = 10
+    nativePollTimer.OnTimer = NativeTCPPollLoop
+    nativePollTimer.Enabled = true
+
+    serverState.tcpPort = result.port
+    return true
+end
+
+local function StopNativeTCP()
+    if nativePollTimer then
+        nativePollTimer.Enabled = false
+        nativePollTimer.destroy()
+        nativePollTimer = nil
+    end
+    if NATIVE_DLL_LOADED then
+        pcall(function() mcp_tcp_stop() end)
+    end
+end
+
+-- ============================================================================
+-- START / STOP
+-- ============================================================================
+
 function StopMCPBridge()
+    StopNativeTCP()
+
     if serverState.workerThread then
         log("Stopping Server (Terminating Thread)...")
 
-        -- TCP: close sockets FIRST to unblock any blocking calls, THEN terminate thread
         if serverState.clientSocket then
             pcall(function() tcpClose(serverState.clientSocket) end)
             serverState.clientSocket = nil
@@ -6314,7 +6417,6 @@ function StopMCPBridge()
         serverState.workerThread.terminate()
         sleep(100)
 
-        -- Pipe: force destroy to unblock acceptConnection/read
         if serverState.workerPipe then
             pcall(function() serverState.workerPipe.destroy() end)
             serverState.workerPipe = nil
@@ -6343,11 +6445,20 @@ function StartMCPBridge()
     serverState.connected = false
 
     if TRANSPORT == "tcp" then
-        serverState.workerThread = createThread(TCPWorker)
-        log("===========================================")
-        log("MCP Server: TCP port range " .. TCP_BASE_PORT .. "-" .. TCP_MAX_PORT)
-        log("Architecture: Winsock FFI + Synchronized Execution")
-        log("===========================================")
+        -- Try native DLL first, fall back to Winsock FFI
+        if tryLoadNativeDLL() and StartNativeTCP() then
+            log("===========================================")
+            log("MCP Server: TCP port range " .. TCP_BASE_PORT .. "-" .. TCP_MAX_PORT)
+            log("Architecture: Native DLL + Timer Poll")
+            log("===========================================")
+        else
+            log("Native DLL not available, using Winsock FFI...")
+            serverState.workerThread = createThread(TCPWorker)
+            log("===========================================")
+            log("MCP Server: TCP port range " .. TCP_BASE_PORT .. "-" .. TCP_MAX_PORT)
+            log("Architecture: Winsock FFI + Synchronized Execution")
+            log("===========================================")
+        end
     else
         serverState.workerThread = createThread(PipeWorker)
         log("===========================================")
