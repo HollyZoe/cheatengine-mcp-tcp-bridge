@@ -6,7 +6,7 @@
 
 创建修改器、训练器、安全审计、游戏机器人、加速逆向工程——或者对任何程序和游戏做任何事情，效率提升数十倍。
 
-[![Version](https://img.shields.io/badge/version-14.1.0-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-TCP%20%7C%20Pipe-orange.svg)](#)
+[![Version](https://img.shields.io/badge/version-15.0.0-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-TCP%20(Native%20DLL)-orange.svg)](#)
 
 ---
 
@@ -59,31 +59,31 @@ flowchart TD
     
     MCP[mcp_cheatengine.py - Python MCP 服务器]
     
-    MCP <-->|"TCP Socket (默认) 或 Named Pipe"| BRIDGE
+    MCP <-->|"TCP Socket (端口 17171+)"| DLL
     
-    BRIDGE["TCP 127.0.0.1:17171 / \\.\pipe\CE_MCP_Bridge_v99"]
-    
-    BRIDGE <--> CE
-    
-    subgraph CE[Cheat Engine - DBVM 模式]
-        subgraph LUA[ce_mcp_bridge.lua]
-            WORKER["TCP 工作线程<br/>Winsock FFI + select()"]
-            MAIN["主线程<br/>GUI + CE API"]
-            WORKER <-->|thread.synchronize| MAIN
+    subgraph CE[Cheat Engine]
+        subgraph DLL_BLOCK[ce_mcp_tcp.dll - 原生 TCP 桥接]
+            DLL[TCP 服务端线程<br/>Winsock2 + select]
         end
+        subgraph LUA[ce_mcp_bridge.lua]
+            POLL[定时器轮询循环<br/>10ms 间隔]
+            CMD[命令处理器<br/>约 180 个工具]
+        end
+        DLL <-->|"Lua C API<br/>poll/respond"| POLL
+        POLL --> CMD
     end
     
-    MAIN -->|内存访问| TARGET[目标进程 .exe]
+    CMD -->|CE API| TARGET[目标进程]
 ```
 
 ### 传输模式
 
 | 模式 | 协议 | 使用场景 |
 |------|------|---------|
-| **TCP**（默认） | TCP/IP 端口 17171 | 本地和远程，稳定重连 |
-| **Pipe**（旧版） | Windows 命名管道 | 仅本地，需要 `pywin32` |
+| **TCP**（默认） | 原生 DLL TCP 服务器，端口 17171+ | 本地和远程，稳定重连 |
+| **Pipe**（旧版/已弃用） | Windows 命名管道 | 仅本地，需要 `pywin32` |
 
-TCP 模式使用内建于 CE Lua 脚本的 Winsock FFI 层——Cheat Engine 端无需任何外部依赖。
+TCP 模式使用原生 C DLL（`ce_mcp_tcp_x64.dll` / `ce_mcp_tcp_x86.dll`），由 Lua 桥接脚本通过 `package.loadlib` 加载。DLL 负责所有 Winsock TCP 通信；Lua 以 10ms 定时器轮询命令并分发响应。Lua 中不再包含 Winsock FFI 或 kernel32 引导代码。
 
 ---
 
@@ -93,6 +93,7 @@ TCP 模式使用内建于 CE Lua 脚本的 Winsock FFI 层——Cheat Engine 端
 |------|------|------|
 | **Python** | 3.10+ | MCP 服务器运行所需 |
 | **Cheat Engine** | 7.5+ | 推荐 7.6；DBVM 功能需要 DBVM 版本的 CE |
+| **原生 TCP DLL** | v2.0.0 | 将 `ce_mcp_tcp_x64.dll` 或 `ce_mcp_tcp_x86.dll` 放在 CE 可执行文件目录 |
 | **pip 包 `mcp`** | 最新版 | `pip install mcp` |
 | **Git** | 任意版本 | 用于克隆仓库 |
 
@@ -131,6 +132,24 @@ pip install mcp
 > pip install -r MCP_Server/requirements.txt
 > ```
 
+### 第三步：将原生 TCP DLL 放入 Cheat Engine 目录
+
+从 `MCP_Server/` 复制与 CE 架构匹配的 DLL 到 **Cheat Engine 可执行文件所在目录**（例如 `cheatengine-x86_64.exe` 所在文件夹）：
+
+| CE 版本 | 需复制的 DLL |
+|---------|-------------|
+| 64 位 | `ce_mcp_tcp_x64.dll` |
+| 32 位 | `ce_mcp_tcp_x86.dll` |
+
+示例（64 位 CE 安装在 `C:\CE 7.5`）：
+
+```
+C:\CE 7.5\cheatengine-x86_64.exe
+C:\CE 7.5\ce_mcp_tcp_x64.dll    ← 复制到此
+```
+
+预编译二进制文件也可在 `NativeBridge/bin/x64/` 和 `NativeBridge/bin/x86/` 中找到（若从源码重新编译）。
+
 ---
 
 ## 快速开始
@@ -163,14 +182,27 @@ dofile([[C:\path\to\cheatengine-mcp-tcp-bridge\MCP_Server\ce_mcp_bridge.lua]])
 
 **Cheat Engine 的 Lua 输出窗口中应显示：**
 ```
-[MCP v14.1.0] Starting MCP Bridge v14.1.0 [tcp]
-[MCP v14.1.0] Winsock initialized (version 2.2)
-[MCP v14.1.0] TCP Server listening on 0.0.0.0:17171
-[MCP v14.1.0] TCP: Waiting for client connection...
+[MCP] CE path: C:\path\to\CE 7.5
+[MCP] CE x64 - loading ce_mcp_tcp_x64.dll
+[MCP] DLL loaded OK from: C:\path\to\CE 7.5\ce_mcp_tcp_x64.dll
+[MCP] Bridge started on port 17171 (native mode) - you can close this window now.
 ```
 
-> [!WARNING]
-> 如果看到 `ERROR: cannot resolve kernel32 base functions`，你的 CE 版本可能不支持 `getAddressSafe(name, true)`。请尝试更新 Cheat Engine 到 7.5+。
+同时会打开 **独立的 DLL 调试控制台**，输出诊断信息：
+```
+[MCP-DLL] ce_mcp_tcp.dll loaded (v2.0.0)
+[MCP-DLL] luaopen_ce_mcp_tcp called
+[MCP-DLL] Resolving Lua API (17 functions)...
+[MCP-DLL] Found module: lua53-64.dll
+[MCP-DLL]   lua53-64.dll => 17/17 functions
+[MCP-DLL] Native mode: 5 Lua functions registered
+[MCP-DLL] mcp_tcp_start called
+[MCP-DLL] TCP server thread started
+[MCP-DLL] Listening on 0.0.0.0:17171 (mode: Lua API)
+```
+
+> [!TIP]
+> 若 DLL 缺失，Lua 输出会提示加载失败 — 请参阅 [故障排除](#故障排除)。运行脚本前请将 `ce_mcp_tcp_x64.dll`（或 `_x86.dll`）放在 CE 可执行文件旁。
 
 ### 第三步：配置 AI 客户端
 
@@ -281,7 +313,7 @@ sudo ufw allow 17171/tcp
 
 预期响应：
 ```json
-{"success": true, "version": "14.1.0", "message": "CE MCP Bridge v14.1.0 alive"}
+{"success": true, "version": "15.0.0", "message": "CE MCP Bridge v15.0.0 alive"}
 ```
 
 > [!TIP]
@@ -389,9 +421,9 @@ sudo ufw allow 17171/tcp
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `CE_TRANSPORT` | `tcp` | 传输模式：`tcp`（推荐）或 `pipe`（旧版） |
+| `CE_TRANSPORT` | `tcp` | 传输模式：`tcp`（推荐）或 `pipe`（旧版/已弃用） |
 | `CE_HOST` | `127.0.0.1` | Cheat Engine 实例的 TCP 主机地址。远程调试时设为远程 IP |
-| `CE_PORT` | `17171` | TCP 基础端口。CE Bridge 会在端口被占用时自动递增 |
+| `CE_PORT` | `17171` | TCP 基础端口。DLL 在端口被占用时自动递增 |
 | `CE_PORT_RANGE` | `10` | 从 `CE_PORT` 开始扫描的端口数量。Python 客户端会逐个尝试并通过 `ping` 验证 |
 | `CE_MCP_TIMEOUT` | `90` | 每次 MCP 工具调用的超时时间（秒）。设为 `0` 禁用 |
 | `CE_MCP_ALLOW_SHELL` | *未设置* | 设为 `1` 启用 `run_command` / `shell_execute` 工具。**存在任意代码执行风险**——默认不设置 |
@@ -400,19 +432,38 @@ sudo ufw allow 17171/tcp
 
 ## TCP 架构详解
 
-### CE Lua 服务端（ce_mcp_bridge.lua）
+### 原生 TCP 桥接 DLL（`ce_mcp_tcp_x64.dll` / `ce_mcp_tcp_x86.dll`）
 
-Lua 脚本使用 **Winsock FFI 层**在 Cheat Engine 内部实现了完整的 TCP 服务器：
+编译的 C DLL（v2.0.0）负责所有 TCP 通信，取代了此前 Lua 中的 Winsock FFI 实现。
 
-1. **Kernel32 引导** — 使用 `getAddressSafe(name, true)` 解析 CE 自身进程中的 `VirtualAlloc`、`VirtualFree`、`LoadLibraryA`、`GetProcAddress`。
-2. **Winsock 初始化** — 将 `ws2_32.dll` 加载到 CE 进程并解析 14 个 Socket 函数。
-3. **TCP 服务器** — 绑定到 `0.0.0.0:17171`（端口被占用时自动递增到 17181），监听队列为 1。
-4. **Accept 循环** — 使用 `select()` 设置 1 秒超时，高效等待连接。
-5. **Recv 循环** — 使用 `select()` 设置 5 秒超时，检测数据到达或客户端断连。
-6. **命令执行** — `thread.synchronize()` 将命令调度到 CE 主线程以确保 API 线程安全。
-7. **帧协议** — 4 字节小端序长度前缀 + UTF-8 JSON-RPC 数据。
+| 方面 | 说明 |
+|------|------|
+| **加载方式** | Lua 通过 `package.loadlib` 从 CE 可执行文件目录加载 DLL |
+| **Lua API** | DLL 动态解析 CE 目录中 `lua53-64.dll`（或类似模块）的 17 个 Lua C API 函数 |
+| **注册的函数** | `mcp_tcp_start`、`mcp_tcp_stop`、`mcp_tcp_poll`、`mcp_tcp_respond`、`mcp_tcp_status` |
+| **编译** | 使用 `/MT`（静态 CRT）— 无需安装 Visual C++ 运行库 |
+| **日志** | 打开独立的调试控制台窗口（`[MCP-DLL]` 前缀） |
+| **回退** | 无法解析 Lua API 时使用文件 IPC 模式（详见 DLL 调试控制台） |
 
-### Python 客户端（mcp_cheatengine.py）
+**DLL TCP 服务端流程：**
+
+1. **绑定与监听** — 绑定 `0.0.0.0:17171`（端口忙时自动递增），TCP 服务端线程使用 Winsock2 + `select()`。
+2. **接受与接收** — 一次接受一个客户端，接收带帧的 JSON-RPC 请求。
+3. **入队给 Lua** — 传入命令入队；Lua 的 10ms 定时器调用 `mcp_tcp_poll` 出队。
+4. **主线程执行** — Lua 命令处理器执行 CE API 调用（与之前相同的约 180 个工具）。
+5. **响应** — Lua 调用 `mcp_tcp_respond` 返回 JSON 结果；DLL 发送带长度前缀的 UTF-8 载荷。
+6. **帧协议** — 4 字节小端序长度前缀 + UTF-8 JSON-RPC 数据（与 v14 相同）。
+
+### CE Lua 桥接（`ce_mcp_bridge.lua`）
+
+Lua 脚本现为轻量加载器与命令分发器（已删除约 1000 行废弃的 FFI/Winsock/Pipe 代码）：
+
+1. 解析 CE 安装路径并加载对应架构的 DLL。
+2. 调用 `mcp_tcp_start(port)` 启动原生 TCP 服务器。
+3. 创建 **10ms 定时器**，轮询 `mcp_tcp_poll`、分发命令并调用 `mcp_tcp_respond`。
+4. 无 Winsock FFI、无 kernel32 引导、不依赖 `getAddressSafe`。
+
+### Python 客户端（`mcp_cheatengine.py`）
 
 - **端口扫描** — 尝试 `CE_PORT` 到 `CE_PORT + CE_PORT_RANGE - 1` 的端口，通过 `ping` 命令验证是否为 CE Bridge（而非其他服务）。
 - **自动重连** — 连接断开后，下一条命令会自动重连。
@@ -421,7 +472,7 @@ Lua 脚本使用 **Winsock FFI 层**在 Cheat Engine 内部实现了完整的 TC
 
 ### 端口自动递增
 
-如果默认端口（17171）被占用：
+若默认端口（17171）被占用，**DLL** 会自动递增（与 v14 行为相同，现由原生代码实现）：
 
 | 场景 | CE 服务端端口 | Python 客户端行为 |
 |------|-------------|------------------|
@@ -436,7 +487,7 @@ Lua 脚本使用 **Winsock FFI 层**在 Cheat Engine 内部实现了完整的 TC
 在另一台机器上控制 Cheat Engine 实例：
 
 1. **网络** — 确保 TCP 端口 17171 可达（防火墙、VPN 等）。
-2. **CE 端** — 在远程机器上执行 `ce_mcp_bridge.lua`。服务器默认绑定到 `0.0.0.0`（所有网络接口）。
+2. **CE 端** — 将 DLL 复制到远程 CE 目录，然后执行 `ce_mcp_bridge.lua`。服务器默认绑定到 `0.0.0.0`（所有网络接口）。
 3. **Cursor 端** — 将 `CE_HOST` 设为远程机器的 IP：
 
 ```json
@@ -481,22 +532,40 @@ Lua 脚本使用 **Winsock FFI 层**在 Cheat Engine 内部实现了完整的 TC
 
 使用 `dofile(...)` 从磁盘加载 Bridge，而不是将完整脚本粘贴到作弊表脚本中。Bridge 将命令处理函数声明为全局函数，以避免在一次编译整个 Bridge 时触发 CE Lua 的 200 个局部变量限制。
 
+### DLL 未找到或加载失败
+
+1. 将 `ce_mcp_tcp_x64.dll`（64 位 CE）或 `ce_mcp_tcp_x86.dll`（32 位 CE）复制到 **`cheatengine-x86_64.exe`（或你的 CE 可执行文件）所在目录**。
+2. 本仓库 `MCP_Server/` 中附带预编译副本。
+3. CE Lua 输出应显示 `DLL loaded OK from: ...` — 否则请检查路径与架构是否匹配（x64 CE 需要 `_x64.dll`）。
+
+### Lua API 解析失败
+
+1. 打开 **DLL 调试控制台**（Bridge 启动时自动打开）。
+2. 查找类似 `Found module: lua53-64.dll` 和 `17/17 functions` 的行。
+3. 若解析失败，DLL 可能回退到文件 IPC 模式 — 详情见该控制台日志。
+4. 请使用 CE 7.5+ 及标准 Lua 5.3 构建版本。
+
 ### MCP 客户端无法连接（TCP 模式）
 
 按以下顺序检查：
 
-1. CE Lua 输出显示 `TCP Server listening on 0.0.0.0:17171`。
-2. 运行 `netstat -an | findstr 17171` 确认端口正在监听。
-3. 使用远程 CE 时，验证网络路由（ping、防火墙、VPN）。
-4. 检查 MCP 配置中的 `CE_HOST` 和 `CE_PORT` 是否匹配。
-5. 修改 `mcp.json` / MCP 配置后重启 IDE。
-6. 使用 `ping` 工具 — CE 未附加目标进程时 `process_id: 0` 是正常的。
+1. CE Lua 输出显示 `Bridge started on port 17171 (native mode)`。
+2. DLL 调试控制台显示 `Listening on 0.0.0.0:17171`。
+3. 运行 `netstat -an | findstr 17171` 确认端口正在监听。
+4. 使用远程 CE 时，验证网络路由（ping、防火墙、VPN）。
+5. 检查 MCP 配置中的 `CE_HOST` 和 `CE_PORT` 是否匹配。
+6. 修改 `mcp.json` / MCP 配置后重启 IDE。
+7. 使用 `ping` 工具 — CE 未附加目标进程时 `process_id: 0` 是正常的。
+8. **端口被占用** — DLL 会自动递增端口；查看 DLL 控制台中的实际监听端口，必要时调整 `CE_PORT` 或扫描范围。
 
-### MCP 客户端无法连接（Pipe 模式）
+### MCP 客户端无法连接（Pipe 模式 — 旧版）
 
 1. CE 显示 `MCP Server Listening on: CE_MCP_Bridge_v99`。
 2. 已安装 `pip install pywin32`。
 3. 在 MCP 配置环境中设置 `CE_TRANSPORT=pipe`。
+
+> [!NOTE]
+> Pipe 模式为旧版/已弃用。新部署请使用原生 DLL 的 TCP 模式。
 
 ### 高负载操作时连接断开
 
@@ -512,7 +581,7 @@ Python 客户端超时默认为 90 秒。对于超高负载操作（全进程 AO
 
 ### CE UI 在命令执行期间短暂卡顿
 
-`thread.synchronize()` 在 CE 主线程上运行每条命令。短命令（<100ms）几乎无感知。高负载命令（模块扫描、大量内存读取）可能短暂冻结 UI。这是为了保证 API 线程安全的设计。
+命令处理器通过 Lua 定时器轮询在主线程上运行。短命令（<100ms）几乎无感知。高负载命令（模块扫描、大量内存读取）可能短暂冻结 UI。这是为了保证 API 线程安全的设计。
 
 ---
 
@@ -550,9 +619,17 @@ CLAUDE.md                               # Claude Code agent 指导文件
 README.md                               # 英文文档
 README_CN.md                            # 中文文档
 
+NativeBridge/
+├── ce_mcp_tcp.c                        # 原生 TCP 桥接 DLL 源码
+├── build.bat                           # 编译脚本（需要 VS Build Tools）
+├── bin/x64/ce_mcp_tcp_x64.dll         # 预编译 64 位 DLL
+└── bin/x86/ce_mcp_tcp_x86.dll         # 预编译 32 位 DLL
+
 MCP_Server/
-├── mcp_cheatengine.py                  # Python MCP 服务器（FastMCP，TCP/Pipe 客户端）
-├── ce_mcp_bridge.lua                   # Cheat Engine Lua Bridge（TCP/Pipe 服务端）
+├── mcp_cheatengine.py                  # Python MCP 服务器
+├── ce_mcp_bridge.lua                   # CE Lua 桥接（DLL 加载器 + 命令处理）
+├── ce_mcp_tcp_x64.dll                  # 预编译 64 位 DLL（便于复制）
+├── ce_mcp_tcp_x86.dll                  # 预编译 32 位 DLL（便于复制）
 ├── requirements.txt                    # Python 依赖
 └── test_mcp.py                         # 测试套件
 
@@ -589,6 +666,16 @@ Total: 36/37 PASSED (100% success)
 
 ## 更新日志
 
+### v15.0.0
+- **原生 DLL TCP 桥接** — 用编译的 C DLL 替代 Winsock FFI，兼容性最佳
+- **跨 CE 版本支持** — DLL 动态解析任意 CE 构建的 Lua API
+- **Release MT 构建** — 静态 CRT 链接，无需 VC 运行库
+- **架构专用 DLL** — `ce_mcp_tcp_x64.dll` 与 `ce_mcp_tcp_x86.dll`
+- **调试控制台** — DLL 打开独立控制台窗口输出诊断日志
+- **稳健路径解析** — DLL 使用自身目录路径查找 Lua 库
+- **消除 kernel32 FFI 问题** — 不再出现 `getAddressSafe` 或 PEB 遍历失败
+- **精简 Lua 脚本** — 删除约 1000 行废弃的 FFI/Winsock/Pipe 代码
+
 ### v14.1.0
 - **TCP 传输**（默认）— CE Lua 中基于 Winsock FFI 的 TCP 服务器，无外部依赖
 - **远程支持** — 通过 `CE_HOST` 连接任意机器上的 CE
@@ -621,4 +708,4 @@ Total: 36/37 PASSED (100% success)
 - **原始项目**：[miscusi-peek/cheatengine-mcp-bridge](https://github.com/miscusi-peek/cheatengine-mcp-bridge)
 - **原作者**：[@miscusi-peek](https://github.com/miscusi-peek)
 
-TCP 传输层、远程连接支持、Winsock FFI 实现和端口自动递增功能均在本分支中添加。
+TCP 传输层、远程连接支持、原生 DLL TCP 桥接（v2.0.0）及端口自动递增功能均在本分支中添加。

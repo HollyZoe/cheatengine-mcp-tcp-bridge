@@ -3,7 +3,7 @@
 -- ============================================================================
 
 local PIPE_NAME = "CE_MCP_Bridge_v99"
-local VERSION = "14.1.0"
+local VERSION = "15.0.0"
 
 -- Transport: "tcp" (default) or "pipe" (legacy)
 local TRANSPORT = "tcp"

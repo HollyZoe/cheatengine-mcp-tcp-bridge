@@ -8,7 +8,7 @@
 
 Create mods, trainers, security audits, game bots, accelerate RE, or do anything else with any program and game in a fraction of a time.
 
-[![Version](https://img.shields.io/badge/version-14.1.0-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-TCP%20%7C%20Pipe-orange.svg)](#)
+[![Version](https://img.shields.io/badge/version-15.0.0-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-TCP%20(Native%20DLL)-orange.svg)](#)
 
 > [!NOTE]
 > Thanks everyone for the stars, much appreciated! <3
@@ -68,31 +68,31 @@ flowchart TD
     
     MCP[mcp_cheatengine.py - Python MCP Server]
     
-    MCP <-->|"TCP Socket (default) or Named Pipe"| BRIDGE
+    MCP <-->|"TCP Socket (port 17171+)"| DLL
     
-    BRIDGE["TCP 127.0.0.1:17171 / \\.\pipe\CE_MCP_Bridge_v99"]
-    
-    BRIDGE <--> CE
-    
-    subgraph CE[Cheat Engine - DBVM Mode]
-        subgraph LUA[ce_mcp_bridge.lua]
-            WORKER["TCP Worker Thread<br/>Winsock FFI + select()"]
-            MAIN["Main Thread<br/>GUI + CE API"]
-            WORKER <-->|thread.synchronize| MAIN
+    subgraph CE[Cheat Engine]
+        subgraph DLL_BLOCK[ce_mcp_tcp.dll - Native TCP Bridge]
+            DLL[TCP Server Thread<br/>Winsock2 + select]
         end
+        subgraph LUA[ce_mcp_bridge.lua]
+            POLL[Timer Poll Loop<br/>10ms interval]
+            CMD[Command Handlers<br/>~180 tools]
+        end
+        DLL <-->|"Lua C API<br/>poll/respond"| POLL
+        POLL --> CMD
     end
     
-    MAIN -->|Memory Access| TARGET[Target .exe]
+    CMD -->|CE API| TARGET[Target Process]
 ```
 
 ### Transport Modes
 
 | Mode | Protocol | Use Case |
 |------|----------|----------|
-| **TCP** (default) | TCP/IP socket on port 17171 | Local and remote, stable reconnection |
-| **Pipe** (legacy) | Windows Named Pipe | Local only, requires `pywin32` |
+| **TCP** (default) | Native DLL TCP server on port 17171+ | Local and remote, stable reconnection |
+| **Pipe** (legacy/deprecated) | Windows Named Pipe | Local only, requires `pywin32` |
 
-TCP mode uses a Winsock FFI layer built directly into the CE Lua script — no external dependencies needed in Cheat Engine.
+TCP mode uses a native C DLL (`ce_mcp_tcp_x64.dll` / `ce_mcp_tcp_x86.dll`) loaded by the Lua bridge via `package.loadlib`. The DLL handles all Winsock TCP communication; Lua polls for commands on a 10ms timer and dispatches responses. No Winsock FFI or kernel32 bootstrap in Lua.
 
 ---
 
@@ -102,6 +102,7 @@ TCP mode uses a Winsock FFI layer built directly into the CE Lua script — no e
 |-------------|---------|-------|
 | **Python** | 3.10+ | Required for the MCP server |
 | **Cheat Engine** | 7.5+ | 7.6 recommended; DBVM features require DBVM-enabled build |
+| **Native TCP DLL** | v2.0.0 | `ce_mcp_tcp_x64.dll` or `ce_mcp_tcp_x86.dll` in CE executable directory |
 | **pip package `mcp`** | latest | `pip install mcp` |
 | **Git** | any | For cloning the repo |
 
@@ -140,6 +141,24 @@ pip install mcp
 > pip install -r MCP_Server/requirements.txt
 > ```
 
+### Step 3: Place the Native TCP DLL in Cheat Engine's Directory
+
+Copy the architecture-matching DLL from `MCP_Server/` into the **same folder as your Cheat Engine executable** (e.g. where `cheatengine-x86_64.exe` lives):
+
+| CE build | DLL to copy |
+|----------|-------------|
+| 64-bit | `ce_mcp_tcp_x64.dll` |
+| 32-bit | `ce_mcp_tcp_x86.dll` |
+
+Example (64-bit CE installed at `C:\CE 7.5`):
+
+```
+C:\CE 7.5\cheatengine-x86_64.exe
+C:\CE 7.5\ce_mcp_tcp_x64.dll    ← copy here
+```
+
+Pre-built binaries are also under `NativeBridge/bin/x64/` and `NativeBridge/bin/x86/` if you rebuild from source.
+
 ---
 
 ## Quick Start
@@ -172,14 +191,27 @@ dofile([[C:\path\to\cheatengine-mcp-tcp-bridge\MCP_Server\ce_mcp_bridge.lua]])
 
 **Expected output in Cheat Engine's Lua output window:**
 ```
-[MCP v14.1.0] Starting MCP Bridge v14.1.0 [tcp]
-[MCP v14.1.0] Winsock initialized (version 2.2)
-[MCP v14.1.0] TCP Server listening on 0.0.0.0:17171
-[MCP v14.1.0] TCP: Waiting for client connection...
+[MCP] CE path: C:\path\to\CE 7.5
+[MCP] CE x64 - loading ce_mcp_tcp_x64.dll
+[MCP] DLL loaded OK from: C:\path\to\CE 7.5\ce_mcp_tcp_x64.dll
+[MCP] Bridge started on port 17171 (native mode) - you can close this window now.
 ```
 
-> [!WARNING]
-> If you see `ERROR: cannot resolve kernel32 base functions`, your CE version may not support `getAddressSafe(name, true)`. Try updating Cheat Engine to 7.5+.
+A **separate DLL debug console** also opens with diagnostic output:
+```
+[MCP-DLL] ce_mcp_tcp.dll loaded (v2.0.0)
+[MCP-DLL] luaopen_ce_mcp_tcp called
+[MCP-DLL] Resolving Lua API (17 functions)...
+[MCP-DLL] Found module: lua53-64.dll
+[MCP-DLL]   lua53-64.dll => 17/17 functions
+[MCP-DLL] Native mode: 5 Lua functions registered
+[MCP-DLL] mcp_tcp_start called
+[MCP-DLL] TCP server thread started
+[MCP-DLL] Listening on 0.0.0.0:17171 (mode: Lua API)
+```
+
+> [!TIP]
+> If the DLL is missing, Lua output will indicate load failure — see [Troubleshooting](#troubleshooting). Place `ce_mcp_tcp_x64.dll` (or `_x86.dll`) next to the CE executable before running the script.
 
 ### Step 3: Configure Your AI Client
 
@@ -290,7 +322,7 @@ You: "Ping the Cheat Engine bridge"
 
 Expected response:
 ```json
-{"success": true, "version": "14.1.0", "message": "CE MCP Bridge v14.1.0 alive"}
+{"success": true, "version": "15.0.0", "message": "CE MCP Bridge v15.0.0 alive"}
 ```
 
 > [!TIP]
@@ -398,9 +430,9 @@ And many more at `AI_Context/MCP_Bridge_Command_Reference.md`
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `CE_TRANSPORT` | `tcp` | Transport mode: `tcp` (recommended) or `pipe` (legacy). |
+| `CE_TRANSPORT` | `tcp` | Transport mode: `tcp` (recommended) or `pipe` (legacy/deprecated). |
 | `CE_HOST` | `127.0.0.1` | TCP host address of the Cheat Engine instance. Set to a remote IP for remote debugging. |
-| `CE_PORT` | `17171` | TCP base port. The CE bridge auto-increments if the port is in use. |
+| `CE_PORT` | `17171` | TCP base port. The DLL auto-increments if the port is in use. |
 | `CE_PORT_RANGE` | `10` | Number of ports to scan starting from `CE_PORT`. The Python client tries each port and verifies the CE bridge via `ping`. |
 | `CE_MCP_TIMEOUT` | `90` | Timeout (seconds) for each MCP tool call. Set to `0` to disable. |
 | `CE_MCP_ALLOW_SHELL` | *unset* | Set to `1` to enable `run_command` / `shell_execute` tools. **Arbitrary code execution risk** — leave unset by default. |
@@ -409,19 +441,38 @@ And many more at `AI_Context/MCP_Bridge_Command_Reference.md`
 
 ## TCP Architecture Details
 
-### CE Lua Server (ce_mcp_bridge.lua)
+### Native TCP Bridge DLL (`ce_mcp_tcp_x64.dll` / `ce_mcp_tcp_x86.dll`)
 
-The Lua script implements a full TCP server inside Cheat Engine using a **Winsock FFI layer**:
+A compiled C DLL (v2.0.0) handles all TCP communication. It replaces the previous Winsock FFI implementation in Lua.
 
-1. **Kernel32 Bootstrap** — resolves `VirtualAlloc`, `VirtualFree`, `LoadLibraryA`, `GetProcAddress` using `getAddressSafe(name, true)` (CE's own process).
-2. **Winsock Init** — loads `ws2_32.dll` into CE's process and resolves 14 socket functions.
-3. **TCP Server** — binds to `0.0.0.0:17171` (auto-increments to 17181 if ports are busy), listens with backlog 1.
-4. **Accept Loop** — uses `select()` with 1-second timeout to efficiently wait for connections.
-5. **Recv Loop** — uses `select()` with 5-second timeout to detect data or client disconnect.
-6. **Command Execution** — `thread.synchronize()` dispatches commands to CE's main thread for API safety.
-7. **Framing Protocol** — 4-byte little-endian length prefix + UTF-8 JSON-RPC payload.
+| Aspect | Detail |
+|--------|--------|
+| **Loading** | Lua loads the DLL via `package.loadlib` from the CE executable directory |
+| **Lua API** | DLL dynamically resolves 17 Lua C API functions from `lua53-64.dll` (or similar) in CE's directory |
+| **Registered functions** | `mcp_tcp_start`, `mcp_tcp_stop`, `mcp_tcp_poll`, `mcp_tcp_respond`, `mcp_tcp_status` |
+| **Build** | Compiled with `/MT` (static CRT) — no Visual C++ runtime redistributable required |
+| **Logging** | Opens a separate debug console window (`[MCP-DLL]` prefix) |
+| **Fallback** | File IPC mode when Lua API cannot be resolved (see DLL debug console) |
 
-### Python Client (mcp_cheatengine.py)
+**DLL TCP server flow:**
+
+1. **Bind & listen** — binds to `0.0.0.0:17171` (auto-increments if ports are busy), TCP server thread uses Winsock2 + `select()`.
+2. **Accept & recv** — accepts one client at a time, receives framed JSON-RPC requests.
+3. **Queue to Lua** — incoming commands are queued; Lua's 10ms timer calls `mcp_tcp_poll` to dequeue.
+4. **Execute on main thread** — Lua command handlers run CE API calls (same ~180 tools as before).
+5. **Respond** — Lua calls `mcp_tcp_respond` with JSON results; DLL sends length-prefixed UTF-8 payload.
+6. **Framing** — 4-byte little-endian length prefix + UTF-8 JSON-RPC payload (unchanged from v14).
+
+### CE Lua Bridge (`ce_mcp_bridge.lua`)
+
+The Lua script is now a thin loader and command dispatcher (~1000 lines of dead FFI/Winsock/Pipe code removed):
+
+1. Resolves CE install path and loads the correct architecture DLL.
+2. Calls `mcp_tcp_start(port)` to start the native TCP server.
+3. Creates a **10ms timer** that polls `mcp_tcp_poll`, dispatches commands to handlers, and calls `mcp_tcp_respond`.
+4. No Winsock FFI, no kernel32 bootstrap, no `getAddressSafe` dependency.
+
+### Python Client (`mcp_cheatengine.py`)
 
 - **Port Scanning** — tries ports `CE_PORT` through `CE_PORT + CE_PORT_RANGE - 1`, verifying each with a `ping` command to ensure it's a CE bridge (not another service).
 - **Auto-Reconnection** — if the connection drops, the next command automatically reconnects.
@@ -430,7 +481,7 @@ The Lua script implements a full TCP server inside Cheat Engine using a **Winsoc
 
 ### Port Auto-Increment
 
-If the default port (17171) is occupied:
+If the default port (17171) is occupied, the **DLL** auto-increments (same behavior as v14, now in native code):
 
 | Scenario | CE Server Port | Python Client Behavior |
 |----------|---------------|----------------------|
@@ -445,7 +496,7 @@ If the default port (17171) is occupied:
 To control a Cheat Engine instance on another machine:
 
 1. **Network** — ensure TCP port 17171 is reachable (firewall, VPN, etc.).
-2. **CE Side** — execute `ce_mcp_bridge.lua` on the remote machine. The server binds to `0.0.0.0` (all interfaces) by default.
+2. **CE Side** — copy the DLL to the remote CE directory, then execute `ce_mcp_bridge.lua`. The server binds to `0.0.0.0` (all interfaces) by default.
 3. **Cursor Side** — set `CE_HOST` to the remote machine's IP address:
 
 ```json
@@ -490,22 +541,40 @@ Some CE API functions can cause Access Violations (CE crash) when called with in
 
 Load the bridge from disk with `dofile(...)` instead of pasting the full script into a cheat table script. The bridge also declares command handlers as global functions intentionally; this avoids Cheat Engine's Lua chunk limit of 200 local variables when the complete bridge is compiled at once.
 
+### DLL not found or failed to load
+
+1. Copy `ce_mcp_tcp_x64.dll` (64-bit CE) or `ce_mcp_tcp_x86.dll` (32-bit CE) into the **same directory as** `cheatengine-x86_64.exe` (or your CE executable).
+2. Pre-built copies ship in `MCP_Server/` in this repo.
+3. CE Lua output should show `DLL loaded OK from: ...` — if not, check the path and architecture match (x64 CE needs `_x64.dll`).
+
+### Lua API resolution failed
+
+1. Open the **DLL debug console** window (opens automatically when the bridge starts).
+2. Look for lines like `Found module: lua53-64.dll` and `17/17 functions`.
+3. If resolution fails, the DLL may fall back to file IPC mode — details are logged in that console.
+4. Ensure you are using CE 7.5+ with a standard Lua 5.3 build.
+
 ### MCP client cannot connect (TCP mode)
 
 Check these in order:
 
-1. CE Lua output shows `TCP Server listening on 0.0.0.0:17171`.
-2. Run `netstat -an | findstr 17171` to confirm the port is listening.
-3. If using remote CE, verify the network route (ping, firewall, VPN).
-4. Check `CE_HOST` and `CE_PORT` match in your MCP config.
-5. Restart the IDE after modifying `mcp.json` / MCP config.
-6. Use the `ping` tool — `process_id: 0` is normal until CE is attached to a target.
+1. CE Lua output shows `Bridge started on port 17171 (native mode)`.
+2. DLL debug console shows `Listening on 0.0.0.0:17171`.
+3. Run `netstat -an | findstr 17171` to confirm the port is listening.
+4. If using remote CE, verify the network route (ping, firewall, VPN).
+5. Check `CE_HOST` and `CE_PORT` match in your MCP config.
+6. Restart the IDE after modifying `mcp.json` / MCP config.
+7. Use the `ping` tool — `process_id: 0` is normal until CE is attached to a target.
+8. **Port in use** — the DLL auto-increments ports; check the DLL console for the actual listening port and align `CE_PORT` / port scan range if needed.
 
-### MCP client cannot connect (Pipe mode)
+### MCP client cannot connect (Pipe mode — legacy)
 
 1. CE shows `MCP Server Listening on: CE_MCP_Bridge_v99`.
 2. `pip install pywin32` is installed.
 3. Set `CE_TRANSPORT=pipe` in the MCP config environment.
+
+> [!NOTE]
+> Pipe mode is legacy/deprecated. TCP with the native DLL is recommended for all new setups.
 
 ### Connection drops during heavy operations
 
@@ -521,7 +590,7 @@ The Python client timeout defaults to 90 seconds. For extremely heavy operations
 
 ### CE UI freezes briefly during commands
 
-`thread.synchronize()` runs each command on CE's main thread. Short commands (<100ms) are imperceptible. Heavy commands (module scans, large memory reads) may briefly freeze the UI. This is by design for API thread safety.
+Command handlers run on CE's main thread via the Lua timer poll loop. Short commands (<100ms) are imperceptible. Heavy commands (module scans, large memory reads) may briefly freeze the UI. This is by design for API thread safety.
 
 ---
 
@@ -559,9 +628,17 @@ CLAUDE.md                               # Claude Code agent guidance (this repo)
 README.md                               # User-facing documentation (English)
 README_CN.md                            # User-facing documentation (Chinese)
 
+NativeBridge/
+├── ce_mcp_tcp.c                        # Native TCP bridge DLL source
+├── build.bat                           # Build script (requires VS Build Tools)
+├── bin/x64/ce_mcp_tcp_x64.dll         # Pre-built 64-bit DLL
+└── bin/x86/ce_mcp_tcp_x86.dll         # Pre-built 32-bit DLL
+
 MCP_Server/
-├── mcp_cheatengine.py                  # Python MCP Server (FastMCP, TCP/Pipe client)
-├── ce_mcp_bridge.lua                   # Cheat Engine Lua Bridge (TCP/Pipe server)
+├── mcp_cheatengine.py                  # Python MCP Server
+├── ce_mcp_bridge.lua                   # CE Lua Bridge (DLL loader + command handler)
+├── ce_mcp_tcp_x64.dll                  # Pre-built 64-bit DLL (copy for convenience)
+├── ce_mcp_tcp_x86.dll                  # Pre-built 32-bit DLL (copy for convenience)
 ├── requirements.txt                    # Python dependencies
 └── test_mcp.py                         # Test Suite
 
@@ -598,6 +675,16 @@ Total: 36/37 PASSED (100% success)
 
 ## Changelog
 
+### v15.0.0
+- **Native DLL TCP Bridge** — Replaced Winsock FFI with a compiled C DLL for maximum compatibility
+- **Cross-CE-version support** — DLL dynamically resolves Lua API from any CE build
+- **Release MT build** — Static CRT linking, no VC runtime dependency
+- **Architecture-specific DLLs** — `ce_mcp_tcp_x64.dll` and `ce_mcp_tcp_x86.dll`
+- **Debug console** — DLL opens a separate console window for diagnostic logging
+- **Robust path resolution** — DLL uses its own directory path to find Lua libraries
+- **Eliminated kernel32 FFI issues** — No more `getAddressSafe` or PEB-walk failures
+- **Cleaned up Lua script** — Removed ~1000 lines of dead FFI/Winsock/Pipe code
+
 ### v14.1.0
 - **TCP Transport** (default) — Winsock FFI TCP server in CE Lua, no external dependencies
 - **Remote Support** — connect to CE on any machine via `CE_HOST`
@@ -630,4 +717,4 @@ This project is a TCP-enhanced fork of the original **Cheat Engine MCP Bridge**:
 - **Original Project**: [miscusi-peek/cheatengine-mcp-bridge](https://github.com/miscusi-peek/cheatengine-mcp-bridge)
 - **Original Author**: [@miscusi-peek](https://github.com/miscusi-peek)
 
-The TCP transport layer, remote connectivity support, Winsock FFI implementation, and port auto-increment features were added in this fork.
+The TCP transport layer, remote connectivity support, native DLL TCP bridge (v2.0.0), and port auto-increment features were added in this fork.
