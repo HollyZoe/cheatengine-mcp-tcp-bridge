@@ -11,7 +11,8 @@ local TCP_BASE_PORT = 17171
 local TCP_MAX_PORT = 17181
 local TCP_BIND = "0.0.0.0"
 
--- CE value-type constant fallbacks (some CE builds may not expose them globally)
+-- CE constant fallbacks (some CE builds may not expose all globals)
+-- Value types
 if vtByte      == nil then vtByte      = 0 end
 if vtWord      == nil then vtWord      = 1 end
 if vtDword     == nil then vtDword     = 2 end
@@ -21,6 +22,24 @@ if vtDouble    == nil then vtDouble    = 5 end
 if vtString    == nil then vtString    = 6 end
 if vtByteArray == nil then vtByteArray = 7 end
 if vtPointer   == nil then vtPointer   = 8 end
+-- Scan options
+if soExactValue     == nil then soExactValue     = 0 end
+if soValueBetween   == nil then soValueBetween   = 1 end
+if soBiggerThan     == nil then soBiggerThan     = 2 end
+if soSmallerThan    == nil then soSmallerThan    = 3 end
+if soIncreasedValue == nil then soIncreasedValue = 4 end
+if soDecreasedValue == nil then soDecreasedValue = 5 end
+if soChanged        == nil then soChanged        = 6 end
+if soUnchanged      == nil then soUnchanged      = 7 end
+if soUnknownValue   == nil then soUnknownValue   = 8 end
+-- Rounding / alignment
+if rtRounded     == nil then rtRounded     = 0 end
+if fsmNotAligned == nil then fsmNotAligned = 0 end
+-- Breakpoint types / methods
+if bptExecute      == nil then bptExecute      = 0 end
+if bptAccess       == nil then bptAccess       = 1 end
+if bptWrite        == nil then bptWrite        = 2 end
+if bpmDebugRegister == nil then bpmDebugRegister = 1 end
 
 -- Global State
 local serverState = {
