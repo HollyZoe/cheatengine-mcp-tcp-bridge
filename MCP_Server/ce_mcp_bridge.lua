@@ -11,6 +11,17 @@ local TCP_BASE_PORT = 17171
 local TCP_MAX_PORT = 17181
 local TCP_BIND = "0.0.0.0"
 
+-- CE value-type constant fallbacks (some CE builds may not expose them globally)
+if vtByte      == nil then vtByte      = 0 end
+if vtWord      == nil then vtWord      = 1 end
+if vtDword     == nil then vtDword     = 2 end
+if vtQword     == nil then vtQword     = 3 end
+if vtSingle    == nil then vtSingle    = 4 end
+if vtDouble    == nil then vtDouble    = 5 end
+if vtString    == nil then vtString    = 6 end
+if vtByteArray == nil then vtByteArray = 7 end
+if vtPointer   == nil then vtPointer   = 8 end
+
 -- Global State
 local serverState = {
     running = false,
@@ -2807,7 +2818,6 @@ local vartypeMap = {
     pointer   = vtPointer,
 }
 
--- Constant reverse map; hoisted so it is not reallocated on every call.
 local vtypeNames = {
     [vtByte]      = "byte",
     [vtWord]      = "word",
