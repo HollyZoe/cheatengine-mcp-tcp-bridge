@@ -18,11 +18,12 @@ if not exist %OUTDIR% mkdir %OUTDIR%
 
 echo Building ce_mcp_tcp.dll (%ARCH%)...
 
-cl.exe /nologo /O2 /LD /W3 ^
+cl.exe /nologo /O2 /LD /W3 /MT ^
     /D "WIN32" /D "NDEBUG" /D "_WINDOWS" /D "_USRDLL" ^
+    /D "_CRT_SECURE_NO_WARNINGS" /D "_WINSOCK_DEPRECATED_NO_WARNINGS" ^
     ce_mcp_tcp.c ^
     ws2_32.lib kernel32.lib user32.lib ^
-    /Fe:%OUTDIR%\ce_mcp_tcp.dll ^
+    /Fe:%OUTDIR%\ce_mcp_tcp_%ARCH%.dll ^
     /Fo:%OUTDIR%\ ^
     /link /DLL /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF
 
@@ -35,7 +36,7 @@ REM Clean up intermediate files
 del /q %OUTDIR%\*.obj %OUTDIR%\*.exp %OUTDIR%\*.lib 2>nul
 
 echo.
-echo SUCCESS: %OUTDIR%\ce_mcp_tcp.dll
+echo SUCCESS: %OUTDIR%\ce_mcp_tcp_%ARCH%.dll
 echo.
 echo Copy this DLL next to ce_mcp_bridge.lua on the target machine.
 
