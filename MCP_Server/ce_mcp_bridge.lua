@@ -5639,8 +5639,6 @@ end
 -- ============================================================================
 
 local NATIVE_DLL_LOADED = false
-local FILE_IPC_MODE = false
-local nativePollTimer = nil
 
 local function tryLoadNativeDLL()
     local ceDir = "."
@@ -5671,10 +5669,6 @@ local function tryLoadNativeDLL()
                 NATIVE_DLL_LOADED = true
                 print("[MCP] DLL loaded OK from: " .. path)
                 return true
-            else
-                NATIVE_DLL_LOADED = true
-                print("[MCP] DLL loaded (file IPC mode) from: " .. path)
-                return true
             end
         end
     end
@@ -5683,53 +5677,13 @@ local function tryLoadNativeDLL()
 end
 
 -- ============================================================================
--- FILE IPC MODE (when DLL can't resolve Lua API)
+-- THREADED EXECUTION HANDLER (called by DLL TCP thread via pcall)
 -- ============================================================================
 
-local function getFileIpcDir()
-    local tmp = os.getenv("TEMP") or os.getenv("TMP") or "C:\\Temp"
-    return tmp .. "\\ce_mcp\\"
-end
-
-local function fileExists(path)
-    local f = io.open(path, "rb")
-    if f then f:close(); return true end
-    return false
-end
-
-local function fileRead(path)
-    local f = io.open(path, "rb")
-    if not f then return nil end
-    local data = f:read("*a")
-    f:close()
-    return data
-end
-
-local function fileWriteAtomic(path, data)
-    local tmp = path .. ".tmp"
-    local f = io.open(tmp, "wb")
-    if not f then return false end
-    f:write(data)
-    f:close()
-    os.remove(path)
-    os.rename(tmp, path)
-    return true
-end
-
-local function FileIPCPollLoop()
-    if not FILE_IPC_MODE then return end
-
-    local ipcDir = getFileIpcDir()
-    local cmdPath = ipcDir .. "cmd.txt"
-    if not fileExists(cmdPath) then return end
-
-    local cmd = fileRead(cmdPath)
-    os.remove(cmdPath)
-    if not cmd or #cmd == 0 then return end
-
+function MCP_NativeExecute(cmdJson)
     local response = nil
     local ok, err = pcall(function()
-        response = executeCommand(cmd)
+        response = executeCommand(cmdJson)
     end)
     if not ok then
         response = json.encode({
@@ -5738,31 +5692,7 @@ local function FileIPCPollLoop()
             id = nil
         })
     end
-
-    if response then
-        local respPath = ipcDir .. "resp.txt"
-        fileWriteAtomic(respPath, response)
-    end
-end
-
-local function NativeTCPPollLoop()
-    local cmd = mcp_tcp_poll()
-    if not cmd then return end
-
-    local response = nil
-    local ok, err = pcall(function()
-        response = executeCommand(cmd)
-    end)
-    if not ok then
-        response = json.encode({
-            jsonrpc = "2.0",
-            error = { code = -32603, message = "Internal error: " .. tostring(err) },
-            id = nil
-        })
-    end
-    if response then
-        pcall(mcp_tcp_respond, response)
-    end
+    return response or ""
 end
 
 -- ============================================================================
@@ -5770,15 +5700,9 @@ end
 -- ============================================================================
 
 function StopMCPBridge()
-    if nativePollTimer then
-        nativePollTimer.Enabled = false
-        nativePollTimer.destroy()
-        nativePollTimer = nil
-    end
     if NATIVE_DLL_LOADED and type(mcp_tcp_stop) == "function" then
         pcall(mcp_tcp_stop)
     end
-    FILE_IPC_MODE = false
     cleanupZombieState()
 end
 
@@ -5792,56 +5716,33 @@ function StartMCPBridge()
         return
     end
 
-    if type(mcp_tcp_start) == "function" then
-        pcall(function() mcp_tcp_stop() end)
-        local result = mcp_tcp_start(TCP_BASE_PORT, TCP_BIND)
-        if not result or not result.ok then
-            print("[MCP] ERROR: TCP start failed: " .. tostring(result and result.err or "unknown"))
-            return
-        end
-        serverState.tcpPort = result.port
-
-        nativePollTimer = createTimer(nil, false)
-        nativePollTimer.Interval = 10
-        nativePollTimer.OnTimer = NativeTCPPollLoop
-        nativePollTimer.Enabled = true
-
-        print("[MCP] Bridge started on port " .. result.port .. " (native mode) - you can close this window now.")
-    else
-        local ipcDir = getFileIpcDir()
-        local statusPath = ipcDir .. "status.txt"
-        local portPath = ipcDir .. "port.txt"
-
-        local retries = 0
-        while retries < 100 do
-            if fileExists(statusPath) then break end
-            if sleep then sleep(50) end
-            retries = retries + 1
-        end
-
-        local status = fileRead(statusPath)
-        if not status or status ~= "OK" then
-            print("[MCP] ERROR: DLL file IPC failed: " .. tostring(status))
-            return
-        end
-
-        local portStr = fileRead(portPath)
-        local port = tonumber(portStr) or 0
-        if port <= 0 then
-            print("[MCP] ERROR: Invalid port from DLL: " .. tostring(portStr))
-            return
-        end
-
-        serverState.tcpPort = port
-        FILE_IPC_MODE = true
-
-        nativePollTimer = createTimer(nil, false)
-        nativePollTimer.Interval = 10
-        nativePollTimer.OnTimer = FileIPCPollLoop
-        nativePollTimer.Enabled = true
-
-        print("[MCP] Bridge started on port " .. port .. " (file IPC mode) - you can close this window now.")
+    if type(mcp_tcp_start) ~= "function" then
+        print("[MCP] FATAL: mcp_tcp_start not available")
+        return
     end
+
+    pcall(function() mcp_tcp_stop() end)
+    local result = mcp_tcp_start(TCP_BASE_PORT, TCP_BIND)
+    if not result or not result.ok then
+        print("[MCP] ERROR: TCP start failed: " .. tostring(result and result.err or "unknown"))
+        return
+    end
+    serverState.tcpPort = result.port
+
+    if type(mcp_tcp_set_threaded) ~= "function" then
+        print("[MCP] FATAL: DLL too old, mcp_tcp_set_threaded not available")
+        pcall(mcp_tcp_stop)
+        return
+    end
+
+    local tr = mcp_tcp_set_threaded(1)
+    if not tr or not tr.ok or not tr.threaded then
+        print("[MCP] ERROR: Failed to enable threaded mode")
+        pcall(mcp_tcp_stop)
+        return
+    end
+
+    print("[MCP] Bridge started on port " .. result.port .. " (THREADED mode - UI thread free)")
 end
 
 -- Auto-start

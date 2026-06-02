@@ -76,6 +76,12 @@ static int         (*pL_error)(lua_State*);
 
 static int lua_api_ready = 0;
 
+/* Thread-safe Lua execution state */
+static lua_State *g_lua_state = NULL;
+static CRITICAL_SECTION g_lua_cs;
+static volatile int g_lua_cs_init = 0;
+static volatile int g_threaded_mode = 0;  /* 1 = execute in TCP thread via pcall */
+
 typedef struct {
     const char *name;
     void       **ptr;
@@ -302,72 +308,66 @@ static void lua_register_func(lua_State *L, const char *name, lua_CFunction f) {
     pL_setglobal(L, name);
 }
 
-/* ---------- File-based IPC (fallback mode) ---------- */
+/* ---------- JSON method extractor ---------- */
 
-static volatile int g_file_mode = 0;
-static char g_ipc_dir[MAX_PATH] = {0};
-
-static void file_ipc_init(void) {
-    char tmp[MAX_PATH];
-    GetTempPathA(MAX_PATH, tmp);
-    _snprintf(g_ipc_dir, MAX_PATH, "%sce_mcp\\", tmp);
-    CreateDirectoryA(g_ipc_dir, NULL);
-    dbg_log("[MCP-DLL] File IPC dir: %s", g_ipc_dir);
+static const char* extract_json_method(const char *json, char *out, int outLen) {
+    const char *key = "\"method\"";
+    const char *p = strstr(json, key);
+    if (!p) { out[0] = '\0'; return out; }
+    p += strlen(key);
+    while (*p == ' ' || *p == ':' || *p == '\t') p++;
+    if (*p != '"') { out[0] = '\0'; return out; }
+    p++;
+    int i = 0;
+    while (*p && *p != '"' && i < outLen - 1) out[i++] = *p++;
+    out[i] = '\0';
+    return out;
 }
 
-static void file_ipc_path(char *out, int outLen, const char *filename) {
-    _snprintf(out, outLen, "%s%s", g_ipc_dir, filename);
-}
+/* ---------- Threaded Lua Execution ---------- */
 
-static int file_write_atomic(const char *filename, const char *data, int len) {
-    char tmpPath[MAX_PATH], finalPath[MAX_PATH];
-    file_ipc_path(tmpPath, MAX_PATH, filename);
-    strncat(tmpPath, ".tmp", MAX_PATH - strlen(tmpPath) - 1);
-    file_ipc_path(finalPath, MAX_PATH, filename);
+static char* execute_lua_handler(const char *cmd_json, int cmd_len, int *out_resp_len) {
+    if (!g_lua_state || !g_threaded_mode || !pL_getglobal || !pL_pcallk) {
+        *out_resp_len = 0;
+        return NULL;
+    }
 
-    HANDLE hf = CreateFileA(tmpPath, GENERIC_WRITE, 0, NULL,
-                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hf == INVALID_HANDLE_VALUE) return 0;
-    DWORD written;
-    WriteFile(hf, data, len, &written, NULL);
-    CloseHandle(hf);
+    char *result = NULL;
+    *out_resp_len = 0;
 
-    MoveFileExA(tmpPath, finalPath, MOVEFILE_REPLACE_EXISTING);
-    return 1;
-}
+    EnterCriticalSection(&g_lua_cs);
 
-static char* file_read_all(const char *filename, int *out_len) {
-    char path[MAX_PATH];
-    file_ipc_path(path, MAX_PATH, filename);
+    pL_getglobal(g_lua_state, "MCP_NativeExecute");
+    pL_pushstring(g_lua_state, cmd_json);
+    int err = pL_pcallk(g_lua_state, 1, 1, 0, 0, NULL);
 
-    HANDLE hf = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
-                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hf == INVALID_HANDLE_VALUE) return NULL;
+    if (err == 0) {
+        size_t rlen = 0;
+        const char *resp = pL_tolstring(g_lua_state, -1, &rlen);
+        if (resp && rlen > 0) {
+            result = (char*)malloc(rlen + 1);
+            if (result) {
+                memcpy(result, resp, rlen);
+                result[rlen] = '\0';
+                *out_resp_len = (int)rlen;
+            }
+        }
+    } else {
+        const char *errmsg = pL_tolstring(g_lua_state, -1, NULL);
+        dbg_log("[MCP-DLL] Lua pcall error: %s", errmsg ? errmsg : "unknown");
+        const char *err_json = "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"Lua execution error\"},\"id\":null}";
+        int elen = (int)strlen(err_json);
+        result = (char*)malloc(elen + 1);
+        if (result) {
+            memcpy(result, err_json, elen + 1);
+            *out_resp_len = elen;
+        }
+    }
 
-    DWORD sz = GetFileSize(hf, NULL);
-    if (sz == 0 || sz == INVALID_FILE_SIZE) { CloseHandle(hf); return NULL; }
+    pL_settop(g_lua_state, 0);
+    LeaveCriticalSection(&g_lua_cs);
 
-    char *buf = (char*)malloc(sz + 1);
-    if (!buf) { CloseHandle(hf); return NULL; }
-    DWORD rd;
-    ReadFile(hf, buf, sz, &rd, NULL);
-    CloseHandle(hf);
-    buf[rd] = '\0';
-    *out_len = (int)rd;
-    return buf;
-}
-
-static int file_exists(const char *filename) {
-    char path[MAX_PATH];
-    file_ipc_path(path, MAX_PATH, filename);
-    DWORD attr = GetFileAttributesA(path);
-    return (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY));
-}
-
-static void file_delete(const char *filename) {
-    char path[MAX_PATH];
-    file_ipc_path(path, MAX_PATH, filename);
-    DeleteFileA(path);
+    return result;
 }
 
 /* ---------- TCP Server ---------- */
@@ -388,16 +388,6 @@ typedef struct {
 
     HANDLE thread;
     DWORD  thread_id;
-
-    CRITICAL_SECTION cs;
-    char  *cmd_buf;
-    int    cmd_len;
-    volatile int cmd_ready;
-
-    char  *resp_buf;
-    int    resp_len;
-    volatile int resp_ready;
-    HANDLE resp_event;
 
     char bind_addr[64];
     int  base_port;
@@ -520,9 +510,8 @@ static DWORD WINAPI tcp_server_thread(LPVOID param) {
         return 3;
     }
 
-    dbg_log("[MCP-DLL] Listening on %s:%d (mode: %s)",
-            br->bind_addr, br->listen_port,
-            g_file_mode ? "FILE IPC" : "Lua API");
+    dbg_log("[MCP-DLL] Listening on %s:%d (THREADED mode)",
+            br->bind_addr, br->listen_port);
     br->listening = 1;
 
     while (br->running) {
@@ -552,66 +541,24 @@ static DWORD WINAPI tcp_server_thread(LPVOID param) {
             char *cmd = tcp_recv_frame(cs, &cmd_len);
             if (!cmd) { br->connected = 0; break; }
 
-            dbg_log("[MCP-DLL] Recv %d bytes", cmd_len);
+            {
+                char method[128];
+                extract_json_method(cmd, method, sizeof(method));
+                dbg_log("[MCP-DLL] CMD: %s", method[0] ? method : "(unknown)");
 
-            if (g_file_mode) {
-                /* FILE IPC: write cmd to file, wait for resp file from Lua */
-                file_delete("resp.txt");
-                file_write_atomic("cmd.txt", cmd, cmd_len);
+                int resp_len = 0;
+                char *resp = execute_lua_handler(cmd, cmd_len, &resp_len);
                 free(cmd);
 
-                DWORD t0 = GetTickCount();
-                int got_resp = 0;
-                while (br->running && br->connected) {
-                    if (file_exists("resp.txt")) {
-                        int rlen = 0;
-                        char *resp = file_read_all("resp.txt", &rlen);
-                        file_delete("resp.txt");
-                        if (resp && rlen > 0) {
-                            dbg_log("[MCP-DLL] Send %d bytes (file)", rlen);
-                            tcp_send_frame(cs, resp, rlen);
-                            free(resp);
-                            got_resp = 1;
-                        }
-                        break;
-                    }
-                    if ((int)(GetTickCount() - t0) > 120000) break;
-                    Sleep(5);
-                }
-                if (!got_resp) {
-                    const char *err = "{\"error\":\"timeout waiting for Lua handler\"}";
+                if (resp && resp_len > 0) {
+                    dbg_log("[MCP-DLL] RSP: %s -> OK (%d bytes)", method[0] ? method : "(unknown)", resp_len);
+                    tcp_send_frame(cs, resp, resp_len);
+                    free(resp);
+                } else {
+                    dbg_log("[MCP-DLL] RSP: %s -> ERROR (no result)", method[0] ? method : "(unknown)");
+                    const char *err = "{\"error\":\"Lua handler returned no result\"}";
                     tcp_send_frame(cs, err, (int)strlen(err));
-                    file_delete("cmd.txt");
                 }
-            } else {
-                /* NATIVE: pass cmd via shared buffer, wait for Lua poll */
-                ResetEvent(br->resp_event);
-
-                EnterCriticalSection(&br->cs);
-                if (br->cmd_buf) free(br->cmd_buf);
-                br->cmd_buf = cmd;
-                br->cmd_len = cmd_len;
-                br->resp_ready = 0;
-                br->cmd_ready = 1;
-                LeaveCriticalSection(&br->cs);
-
-                DWORD wait = WaitForSingleObject(br->resp_event, 120000);
-                if (wait != WAIT_OBJECT_0 || !br->resp_ready) {
-                    const char *err = "{\"error\":\"timeout waiting for command handler\"}";
-                    tcp_send_frame(cs, err, (int)strlen(err));
-                    continue;
-                }
-
-                EnterCriticalSection(&br->cs);
-                if (br->resp_buf && br->resp_len > 0) {
-                    dbg_log("[MCP-DLL] Send %d bytes", br->resp_len);
-                    tcp_send_frame(cs, br->resp_buf, br->resp_len);
-                    free(br->resp_buf);
-                    br->resp_buf = NULL;
-                    br->resp_len = 0;
-                }
-                br->resp_ready = 0;
-                LeaveCriticalSection(&br->cs);
             }
         }
 
@@ -638,8 +585,6 @@ static int start_tcp_server(int base_port, const char *bind_addr) {
     }
 
     memset(&g_bridge, 0, sizeof(g_bridge));
-    InitializeCriticalSection(&g_bridge.cs);
-    g_bridge.resp_event = CreateEventA(NULL, TRUE, FALSE, NULL);
     g_bridge.listen_sock = INVALID_SOCKET;
     g_bridge.client_sock = INVALID_SOCKET;
     g_bridge_initialized = 1;
@@ -651,8 +596,6 @@ static int start_tcp_server(int base_port, const char *bind_addr) {
     g_bridge.thread = CreateThread(NULL, 0, tcp_server_thread, &g_bridge, 0, &g_bridge.thread_id);
     if (!g_bridge.thread) {
         g_bridge.running = 0;
-        DeleteCriticalSection(&g_bridge.cs);
-        CloseHandle(g_bridge.resp_event);
         return 0;
     }
 
@@ -709,25 +652,22 @@ static int l_mcp_tcp_stop(lua_State *L) {
         closesocket(g_bridge.listen_sock);
         g_bridge.listen_sock = INVALID_SOCKET;
     }
-    if (g_bridge.resp_event) SetEvent(g_bridge.resp_event);
     if (g_bridge.thread) {
         WaitForSingleObject(g_bridge.thread, 5000);
         CloseHandle(g_bridge.thread);
         g_bridge.thread = NULL;
     }
 
-    EnterCriticalSection(&g_bridge.cs);
-    if (g_bridge.cmd_buf) { free(g_bridge.cmd_buf); g_bridge.cmd_buf = NULL; }
-    if (g_bridge.resp_buf) { free(g_bridge.resp_buf); g_bridge.resp_buf = NULL; }
-    g_bridge.cmd_ready = 0;
-    g_bridge.resp_ready = 0;
-    LeaveCriticalSection(&g_bridge.cs);
-
-    DeleteCriticalSection(&g_bridge.cs);
-    if (g_bridge.resp_event) { CloseHandle(g_bridge.resp_event); g_bridge.resp_event = NULL; }
     g_bridge.listening = 0;
     g_bridge.connected = 0;
     g_bridge_initialized = 0;
+
+    g_threaded_mode = 0;
+    g_lua_state = NULL;
+    if (g_lua_cs_init) {
+        DeleteCriticalSection(&g_lua_cs);
+        g_lua_cs_init = 0;
+    }
 
     dbg_log("[MCP-DLL] Server stopped");
 
@@ -736,55 +676,28 @@ static int l_mcp_tcp_stop(lua_State *L) {
     return 1;
 }
 
-static int l_mcp_tcp_poll(lua_State *L) {
-    if (!g_bridge.cmd_ready) {
-        lua_pushnothing(L);
-        return 1;
-    }
-    EnterCriticalSection(&g_bridge.cs);
-    if (g_bridge.cmd_ready && g_bridge.cmd_buf) {
-        pL_pushstring(L, g_bridge.cmd_buf);
-        free(g_bridge.cmd_buf);
-        g_bridge.cmd_buf = NULL;
-        g_bridge.cmd_len = 0;
-        g_bridge.cmd_ready = 0;
+static int l_mcp_tcp_set_threaded(lua_State *L) {
+    int enable = 1;
+    if (lua_nargs(L) >= 1 && pL_isnumber && pL_isnumber(L, 1))
+        enable = (int)lua_getint(L, 1);
+
+    if (enable) {
+        if (!g_lua_cs_init) {
+            InitializeCriticalSection(&g_lua_cs);
+            g_lua_cs_init = 1;
+        }
+        g_lua_state = L;
+        g_threaded_mode = 1;
+        dbg_log("[MCP-DLL] Threaded mode ENABLED (Lua state: %p)", (void*)L);
     } else {
-        lua_pushnothing(L);
+        g_threaded_mode = 0;
+        g_lua_state = NULL;
+        dbg_log("[MCP-DLL] Threaded mode DISABLED (legacy poll mode)");
     }
-    LeaveCriticalSection(&g_bridge.cs);
-    return 1;
-}
-
-static int l_mcp_tcp_respond(lua_State *L) {
-    if (lua_nargs(L) < 1 || !pL_isstring || !pL_isstring(L, 1)) {
-        lua_newtable(L);
-        lua_setboolfield(L, -1, "ok", 0);
-        lua_setstrfield(L, -1, "err", "expected string argument");
-        return 1;
-    }
-    size_t len = 0;
-    const char *data = pL_tolstring(L, 1, &len);
-    if (!data || len == 0) {
-        lua_newtable(L);
-        lua_setboolfield(L, -1, "ok", 0);
-        lua_setstrfield(L, -1, "err", "empty response");
-        return 1;
-    }
-
-    EnterCriticalSection(&g_bridge.cs);
-    if (g_bridge.resp_buf) free(g_bridge.resp_buf);
-    g_bridge.resp_buf = (char*)malloc(len + 1);
-    if (g_bridge.resp_buf) {
-        memcpy(g_bridge.resp_buf, data, len);
-        g_bridge.resp_buf[len] = '\0';
-        g_bridge.resp_len = (int)len;
-        g_bridge.resp_ready = 1;
-    }
-    LeaveCriticalSection(&g_bridge.cs);
-    SetEvent(g_bridge.resp_event);
 
     lua_newtable(L);
     lua_setboolfield(L, -1, "ok", 1);
+    lua_setboolfield(L, -1, "threaded", g_threaded_mode);
     return 1;
 }
 
@@ -794,6 +707,7 @@ static int l_mcp_tcp_status(lua_State *L) {
     lua_setboolfield(L, -1, "connected", g_bridge.connected);
     lua_setintfield(L, -1, "port", g_bridge.listen_port);
     lua_setboolfield(L, -1, "running", g_bridge.running);
+    lua_setboolfield(L, -1, "threaded", g_threaded_mode);
     return 1;
 }
 
@@ -810,17 +724,16 @@ __declspec(dllexport) int luaopen_ce_mcp_tcp(lua_State *L) {
     }
 
     /* ---- NATIVE LUA API MODE ---- */
-    lua_register_func(L, "mcp_tcp_start",   l_mcp_tcp_start);
-    lua_register_func(L, "mcp_tcp_stop",    l_mcp_tcp_stop);
-    lua_register_func(L, "mcp_tcp_poll",    l_mcp_tcp_poll);
-    lua_register_func(L, "mcp_tcp_respond", l_mcp_tcp_respond);
-    lua_register_func(L, "mcp_tcp_status",  l_mcp_tcp_status);
+    lua_register_func(L, "mcp_tcp_start",         l_mcp_tcp_start);
+    lua_register_func(L, "mcp_tcp_stop",          l_mcp_tcp_stop);
+    lua_register_func(L, "mcp_tcp_status",        l_mcp_tcp_status);
+    lua_register_func(L, "mcp_tcp_set_threaded",  l_mcp_tcp_set_threaded);
 
-    dbg_log("[MCP-DLL] Native mode: 5 Lua functions registered");
+    dbg_log("[MCP-DLL] Native mode: 4 Lua functions registered (threaded only)");
 
     lua_newtable(L);
-    lua_setstrfield(L, -1, "version", "2.0.0");
-    lua_setstrfield(L, -1, "transport", "native_tcp");
+    lua_setstrfield(L, -1, "version", "3.0.0");
+    lua_setstrfield(L, -1, "transport", "native_tcp_threaded");
     return 1;
 }
 
@@ -829,7 +742,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         g_self_module = hModule;
         dbg_init();
-        dbg_log("[MCP-DLL] ce_mcp_tcp.dll loaded (v2.0.0)");
+        dbg_log("[MCP-DLL] ce_mcp_tcp.dll loaded (v3.0.0 threaded)");
     }
     if (reason == DLL_PROCESS_DETACH) {
         dbg_log("[MCP-DLL] DLL unloading...");
@@ -837,13 +750,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             g_bridge.running = 0;
             if (g_bridge.client_sock != INVALID_SOCKET) closesocket(g_bridge.client_sock);
             if (g_bridge.listen_sock != INVALID_SOCKET) closesocket(g_bridge.listen_sock);
-            if (g_bridge.resp_event) SetEvent(g_bridge.resp_event);
-        }
-        if (g_file_mode) {
-            file_delete("cmd.txt");
-            file_delete("resp.txt");
-            file_delete("status.txt");
-            file_delete("port.txt");
         }
         if (g_logfp) fclose(g_logfp);
         FreeConsole();
