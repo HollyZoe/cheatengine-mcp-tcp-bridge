@@ -52,6 +52,34 @@ ce_mcp_bridge.lua → 目标进程                 ce_mcp_bridge.lua → 目标�
 
 > **安全提示**：TCP **无身份验证和加密**。仅在可信网络中使用。绝不将端口 17171 暴露到公网。
 
+### 项目结构对比
+
+```
+原版                                        本分支
+────                                       ────
+MCP_Server/                                MCP_Server/
+├── mcp_cheatengine.py  (pywin32 管道)      ├── mcp_cheatengine.py  (TCP stdlib)
+├── ce_mcp_bridge.lua   (~6700 行)          ├── ce_mcp_bridge.lua   (~5700 行)
+├── ce_tcp_relay.py     (TCP 中继)          ├── ce_mcp_tcp_x64.dll  ← 新增：原生 DLL
+├── test_mcp.py                            ├── ce_mcp_tcp_x86.dll  ← 新增：原生 DLL
+└── requirements.txt    (mcp + pywin32)    ├── test_mcp.py
+                                           └── requirements.txt    (仅 mcp)
+AI_Context/             (文档)
+                                           NativeBridge/           ← 新增：DLL 源码
+                                           ├── ce_mcp_tcp.c        (770 行 C 代码)
+                                           ├── build.bat
+                                           └── bin/{x64,x86}/
+
+                                           AI_Context/             (文档)
+```
+
+关键结构差异：
+- **移除**：`ce_tcp_relay.py` — TCP 已原生支持，无需中继
+- **移除**：requirements 中的 `pywin32` — TCP 使用 Python 标准库
+- **新增**：`NativeBridge/` — 编译的 C DLL 源码和构建系统
+- **新增**：`MCP_Server/` 中的预编译 DLL，方便部署
+- **精简**：Lua 桥接从 ~6700 行减到 ~5700 行（删除废弃 FFI/管道代码）
+
 ---
 
 ## 安装配置

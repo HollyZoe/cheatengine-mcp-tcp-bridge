@@ -52,6 +52,34 @@ ce_mcp_bridge.lua → Target Process         ce_mcp_bridge.lua → Target Proces
 
 > **Security**: TCP has **no auth/encryption**. Only expose on trusted networks. Never open port 17171 to the internet.
 
+### Project Structure Comparison
+
+```
+ORIGINAL                                   THIS FORK
+────────                                   ─────────
+MCP_Server/                                MCP_Server/
+├── mcp_cheatengine.py  (pywin32 pipe)     ├── mcp_cheatengine.py  (TCP stdlib)
+├── ce_mcp_bridge.lua   (~6700 lines)      ├── ce_mcp_bridge.lua   (~5700 lines)
+├── ce_tcp_relay.py     (TCP relay)        ├── ce_mcp_tcp_x64.dll  ← NEW: native DLL
+├── test_mcp.py                            ├── ce_mcp_tcp_x86.dll  ← NEW: native DLL
+└── requirements.txt    (mcp + pywin32)    ├── test_mcp.py
+                                           └── requirements.txt    (mcp only)
+AI_Context/             (docs)
+                                           NativeBridge/           ← NEW: DLL source
+                                           ├── ce_mcp_tcp.c        (770 lines C)
+                                           ├── build.bat
+                                           └── bin/{x64,x86}/
+
+                                           AI_Context/             (docs)
+```
+
+Key structural differences:
+- **Removed**: `ce_tcp_relay.py` — no longer needed, TCP is native
+- **Removed**: `pywin32` from requirements — TCP uses Python stdlib
+- **Added**: `NativeBridge/` — compiled C DLL source and build system
+- **Added**: Pre-built DLLs in `MCP_Server/` for easy deployment
+- **Reduced**: Lua bridge from ~6700 to ~5700 lines (dead FFI/pipe code removed)
+
 ---
 
 ## Setup
