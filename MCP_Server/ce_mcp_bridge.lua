@@ -1676,61 +1676,37 @@ end
 -- ============================================================================
 
 function cmd_get_memory_regions(params)
+    local ok, allRegs = pcall(enumMemoryRegions)
+    if not ok or not allRegs then
+        return { success = false, error = "enumMemoryRegions failed: " .. tostring(allRegs), error_code = "INTERNAL_ERROR" }
+    end
+
     local regions = {}
-    local maxRegions = params.max or 100
-    local pageSize = 0x1000  -- 4KB pages
-    
-    -- Sample memory at common base addresses to find valid regions
-    local sampleAddresses = {
-        0x00010000, 0x00400000, 0x10000000, 0x20000000, 0x30000000,
-        0x40000000, 0x50000000, 0x60000000, 0x70000000
-    }
-    
-    -- Also add addresses from modules we found via AOB scan
-    local mzScan = AOBScan("4D 5A 90 00 03 00")
-    if mzScan and mzScan.Count > 0 then
-        for i = 0, math.min(mzScan.Count - 1, 20) do
-            local addr = tonumber(mzScan.getString(i), 16)
-            if addr then table.insert(sampleAddresses, addr) end
-        end
-        mzScan.destroy()
-    end
-    
-    -- Check each sample address for memory protection
-    for _, baseAddr in ipairs(sampleAddresses) do
-        if #regions >= maxRegions then break end
-        
-        local ok, prot = pcall(getMemoryProtection, baseAddr)
-        if ok and prot then
-            -- Found a valid memory page
+    for _, r in ipairs(allRegs) do
+        local state = r.State or 0
+        if state == 0x1000 then
+            local prot = r.Protect or 0
+            local rd = (prot == 0x02 or prot == 0x04 or prot == 0x20 or prot == 0x40)
+            local wr = (prot == 0x04 or prot == 0x08 or prot == 0x40 or prot == 0x80)
+            local ex = (prot == 0x10 or prot == 0x20 or prot == 0x40 or prot == 0x80)
             local protStr = ""
-            if prot.r then protStr = protStr .. "R" end
-            if prot.w then protStr = protStr .. "W" end
-            if prot.x then protStr = protStr .. "X" end
-            
-            -- Try to find region size by scanning forward
-            local regionSize = pageSize
-            for offset = pageSize, 0x1000000, pageSize do
-                local ok2, prot2 = pcall(getMemoryProtection, baseAddr + offset)
-                if not ok2 or not prot2 or 
-                   prot2.r ~= prot.r or prot2.w ~= prot.w or prot2.x ~= prot.x then
-                    break
-                end
-                regionSize = offset + pageSize
-            end
-            
-            table.insert(regions, {
-                base = toHex(baseAddr),
-                size = regionSize,
+            if rd then protStr = protStr .. "R" end
+            if wr then protStr = protStr .. "W" end
+            if ex then protStr = protStr .. "X" end
+
+            regions[#regions + 1] = {
+                base       = toHex(r.BaseAddress or 0),
+                size       = r.RegionSize or 0,
                 protection = protStr,
-                readable = prot.r or false,
-                writable = prot.w or false,
-                executable = prot.x or false
-            })
+                readable   = rd,
+                writable   = wr,
+                executable = ex
+            }
         end
     end
-    
-    return { success = true, count = #regions, regions = regions }
+
+    local limit, offset, page, total = paginate(params, regions, 100)
+    return { success = true, total = total, offset = offset, limit = limit, returned = #page, count = #page, regions = page }
 end
 
 -- ============================================================================
@@ -2081,11 +2057,14 @@ function cmd_generate_signature(params)
         }
     end
     
-    if not signature or signature == "" then
+    if not signature or signature == ""
+       or signature:find("错误") or signature:find("Error")
+       or signature:find("error") or signature:find("unable")
+       or signature:find("无法") then
         return {
             success = false,
             address = toHex(addr),
-            error = "Could not generate unique signature - pattern not unique enough"
+            error = "Could not generate unique signature: " .. tostring(signature or "pattern not unique enough")
         }
     end
     
@@ -4852,9 +4831,15 @@ function cmd_debug_is_debugging(params)
 end
 
 function cmd_debug_get_current_debugger_interface(params)
+    if not debug_getCurrentDebuggerInterface then
+        return { success = false, error = "debug_getCurrentDebuggerInterface not available in this CE version", error_code = "CE_API_UNAVAILABLE" }
+    end
+    if not debug_isDebugging or not debug_isDebugging() then
+        return { success = true, interface = nil, interface_name = "none", note = "Not currently debugging" }
+    end
     local ok, iface = pcall(debug_getCurrentDebuggerInterface)
     if not ok then
-        return { success = false, error = tostring(iface) }
+        return { success = false, error = tostring(iface), error_code = "INTERNAL_ERROR" }
     end
     local ifaceName = iface ~= nil
         and (DEBUGGER_INTERFACE_CURRENT_NAME[iface] or ("unknown_" .. tostring(iface)))
@@ -5171,22 +5156,34 @@ function cmd_get_memory_protection(params)
         return { success = false, error = "Invalid address", error_code = "INVALID_ADDRESS" }
     end
 
-    local ok, prot = pcall(getMemoryProtection, addr)
-    if not ok or not prot then
-        return { success = false, error = tostring(prot), error_code = "INTERNAL_ERROR" }
+    local ok, allRegs = pcall(enumMemoryRegions)
+    if not ok or not allRegs then
+        return { success = false, error = "enumMemoryRegions failed: " .. tostring(allRegs), error_code = "INTERNAL_ERROR" }
     end
 
-    local r = prot.r == true
-    local w = prot.w == true
-    local x = prot.x == true
+    for _, r in ipairs(allRegs) do
+        local base = r.BaseAddress or 0
+        local sz   = r.RegionSize or 0
+        if addr >= base and addr < base + sz then
+            local prot = r.Protect or 0
+            local rd = (prot == 0x02 or prot == 0x04 or prot == 0x20 or prot == 0x40)
+            local wr = (prot == 0x04 or prot == 0x08 or prot == 0x40 or prot == 0x80)
+            local ex = (prot == 0x10 or prot == 0x20 or prot == 0x40 or prot == 0x80)
+            return {
+                success = true,
+                read    = rd,
+                write   = wr,
+                execute = ex,
+                raw     = protectionName(rd, wr, ex),
+                protect = prot,
+                base    = toHex(base),
+                size    = sz,
+                state   = r.State or 0
+            }
+        end
+    end
 
-    return {
-        success = true,
-        read    = r,
-        write   = w,
-        execute = x,
-        raw     = protectionName(r, w, x)
-    }
+    return { success = false, error = "Address not found in any memory region", error_code = "NOT_FOUND" }
 end
 
 function cmd_set_memory_protection(params)
@@ -5692,16 +5689,18 @@ local function NativePollLoop()
     workerBusy = true
     createThread(function(thread)
         local response = nil
-        local ok, err = pcall(function()
-            response = executeCommand(cmd)
+        synchronize(function()
+            local ok, err = pcall(function()
+                response = executeCommand(cmd)
+            end)
+            if not ok then
+                response = json.encode({
+                    jsonrpc = "2.0",
+                    error = { code = -32603, message = "Internal error: " .. tostring(err) },
+                    id = nil
+                })
+            end
         end)
-        if not ok then
-            response = json.encode({
-                jsonrpc = "2.0",
-                error = { code = -32603, message = "Internal error: " .. tostring(err) },
-                id = nil
-            })
-        end
         if response then
             pcall(mcp_tcp_respond, response)
         end

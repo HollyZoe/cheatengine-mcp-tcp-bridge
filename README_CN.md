@@ -1,89 +1,89 @@
-[Demo](https://github.com/user-attachments/assets/a184a006-f569-4b55-858a-ed80a7139035)
+**[English](README.md) | [中文](README_CN.md)**
 
-# Cheat Engine MCP Bridge（TCP 增强版）
+# Cheat Engine MCP Bridge — TCP 增强版
 
-**让价值数十亿美元的 AI 数据中心帮你分析程序内存。**
+[![Version](https://img.shields.io/badge/version-15.0.0-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-原生%20TCP%20DLL-orange.svg)](#)
 
-创建修改器、训练器、安全审计、游戏机器人、加速逆向工程——或者对任何程序和游戏做任何事情，效率提升数十倍。
+> 基于 [miscusi-peek/cheatengine-mcp-bridge](https://github.com/miscusi-peek/cheatengine-mcp-bridge) 的高性能分支。用原生 C TCP 桥接替代了 Windows 命名管道传输，开箱即用地支持**远程 CE 控制**、**零 pywin32 依赖**和**多实例并行**。
 
-[![Version](https://img.shields.io/badge/version-15.0.0-blue.svg)](#) [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org) [![Transport](https://img.shields.io/badge/transport-TCP%20(Native%20DLL)-orange.svg)](#)
-
----
-
-## 痛点
-
-你面对的是 GB 级别的内存数据、数百万个地址、数千个函数。找到**那个指针**、**那个结构体**可能要花费**数天甚至数周**的手动工作。
-
-**如果你只需要问一句话呢？**
-
-> *"找到数据包解密钩子。"*  
-> *"找到角色坐标的操作码。"*  
-> *"找到生命值的操作码。"*  
-> *"找到唯一的 AOB 特征码，让修改器在游戏更新后依然可用。"*
-
-**这就是本项目做的事情。**
-
-_—— 不要再手动翻阅十六进制数据了，开始与内存对话吧。_
+[演示视频](https://github.com/user-attachments/assets/a184a006-f569-4b55-858a-ed80a7139035)
 
 ---
 
-## 效果对比
+## 与原版的核心差异
 
-| 传统手动方式 | AI Agent + MCP |
-|-------------|---------------|
-| 第 1 天：找数据包地址 | 第 1 分钟："找到 RX 数据包解密钩子" |
-| 第 2 天：追踪写入源 | 第 3 分钟："生成唯一 AOB 特征码" |
-| 第 3 天：找 RX 钩子 | 第 6 分钟："找到移动操作码" |
-| 第 4 天：记录结构 | 第 10 分钟："创建十六进制转明文的解释器" |
-| 第 5 天：游戏更新，从头再来 | **完成。** |
+本分支从原版 v12.0.0 开始，在传输层、架构和工程实践上做了重大改造。以下是逐项对比。
 
-**AI 可以做到：**
-- 即时读取任意内存（整数、浮点、字符串、指针）
-- 跟踪指针链：`[[base+0x10]+0x20]+0x8` → 毫秒级解析
-- 自动分析结构体字段类型和值
-- 通过 RTTI 识别 C++ 对象：*"这是一个 CPlayer 对象"*
-- 反汇编和分析函数
-- 硬件断点 + Ring -1 虚拟机监控器实现隐形调试
-- 通过 TCP 连接**本地或远程** Cheat Engine 实例
-- 更多功能！
+### 架构对比
 
----
-
-## 工作原理
-
-```mermaid
-flowchart TD
-    AI[AI Agent: Claude/Cursor/Copilot]
-    
-    AI -->|MCP 协议 - JSON-RPC over stdio| MCP
-    
-    MCP[mcp_cheatengine.py - Python MCP 服务器]
-    
-    MCP <-->|"TCP Socket (端口 17171+)"| DLL
-    
-    subgraph CE[Cheat Engine]
-        subgraph DLL_BLOCK[ce_mcp_tcp.dll - 原生 TCP 桥接]
-            DLL[TCP 服务端线程<br/>Winsock2 + select]
-        end
-        subgraph LUA[ce_mcp_bridge.lua]
-            POLL[定时器轮询循环<br/>10ms 间隔]
-            CMD[命令处理器<br/>约 180 个工具]
-        end
-        DLL <-->|"Lua C API<br/>poll/respond"| POLL
-        POLL --> CMD
-    end
-    
-    CMD -->|CE API| TARGET[目标进程]
+```
+原版 (v12.0.0)                              本分支 (v15.0.0)
+────────────                               ────────────
+AI 客户端                                    AI 客户端
+  │ stdio JSON-RPC                            │ stdio JSON-RPC
+  ▼                                           ▼
+mcp_cheatengine.py                          mcp_cheatengine.py
+  │ 命名管道 (需要 pywin32)                     │ TCP 套接字 (仅 stdlib)
+  ▼                                           ▼
+\\.\pipe\CE_MCP_Bridge_v99                  ce_mcp_tcp.dll (原生 C)
+  │                                           │ Winsock2 + select()
+  ▼                                           ▼
+ce_mcp_bridge.lua                           ce_mcp_bridge.lua
+  │ Worker 线程 (Lua 管道 I/O)                  │ 1ms 定时器轮询
+  ▼                                           ▼
+目标进程                                      目标进程
 ```
 
-### 传输模式
+### 功能对比表
 
-| 模式 | 协议 | 使用场景 |
-|------|------|---------|
-| **TCP**（默认） | 原生 DLL TCP 服务器，端口 17171+ | 本地和远程，稳定重连 |
-| **Pipe**（旧版/已弃用） | Windows 命名管道 | 仅本地，需要 `pywin32` |
+| 特性 | 原版 (v12.0.0) | 本分支 (v15.0.0) |
+|------|:--------------:|:----------------:|
+| **传输方式** | Windows 命名管道 | 原生 TCP（编译的 C DLL） |
+| **远程 CE 支持** | 需额外 `ce_tcp_relay.py` 中继脚本 | 内置（`CE_HOST` 环境变量） |
+| **Python 依赖** | `mcp` + `pywin32` | 仅 `mcp` |
+| **多实例支持** | 不支持 | 端口自动递增（17171–17181） |
+| **默认超时** | 30 秒 | 90 秒 |
+| **CE Lua I/O 模型** | Worker 线程阻塞管道 | 1ms 定时器通过 DLL 轮询 |
+| **原生代码** | 无 | `ce_mcp_tcp_x64.dll` / `ce_mcp_tcp_x86.dll` |
+| **DLL 调试控制台** | 无 | 独立诊断控制台窗口 |
+| **安装复杂度** | 仅 `pip install` | `pip install` + 复制 DLL 到 CE 目录 |
+| **跨平台 MCP 服务器** | 需要中继脚本 | 原生支持（TCP 用 stdlib） |
+| **Lua 代码量** | ~6700 行（含 FFI/Winsock/Pipe 代码） | ~5700 行（删除 1000 行废弃代码） |
+| **CRT 依赖** | 无 | 静态 `/MT` 链接——无需 VC 运行库 |
+| **中文文档** | 无 | 有 |
 
-TCP 模式使用原生 C DLL（`ce_mcp_tcp_x64.dll` / `ce_mcp_tcp_x86.dll`），由 Lua 桥接脚本通过 `package.loadlib` 加载。DLL 负责所有 Winsock TCP 通信；Lua 以 10ms 定时器轮询命令并分发响应。Lua 中不再包含 Winsock FFI 或 kernel32 引导代码。
+### 我们获得了什么
+
+- **真正的远程调试** — 将 `CE_HOST` 指向运行 CE 的任意机器。无需中继脚本、无需额外进程。
+- **去掉 pywin32** — 默认 TCP 传输仅使用 Python 标准库。安装更简单、故障点更少。
+- **多 CE 实例支持** — 同时运行多个 CE 实例；每个自动分配独立端口（17171、17172……）。Python 客户端通过 `ping` 验证自动发现正确的实例。
+- **原生 C 性能** — TCP I/O 由编译的 DLL 处理，不再依赖 Lua FFI。消除了 `getAddressSafe` 崩溃、PEB 遍历失败、kernel32 FFI 问题。
+- **更高可靠性** — 90 秒默认超时（原版 30 秒）、3 次自动重试 + 自动重连、线程安全锁。
+- **DLL 调试控制台** — 专用控制台窗口实时显示 TCP 状态、Lua API 解析、连接事件。故障排查一目了然。
+- **更干净的 Lua 代码** — 删除了约 1000 行废弃的 Winsock FFI、管道 Worker 线程和 kernel32 引导代码。
+
+### 我们失去了什么
+
+- **零 DLL 简洁性** — 原版只需安装 Python 包。本分支需要将 DLL 放在 CE 可执行文件旁（多一步操作）。
+- **内置 TCP 中继** — 原版包含 `ce_tcp_relay.py` 用于将命名管道桥接到 TCP。本分支不需要它（TCP 已原生），但中继脚本本身被移除了。
+- **管道传输** — 仍可通过 `CE_TRANSPORT=pipe` + `pywin32` 使用，但已弃用，不再是默认选项。
+
+### 安全提示
+
+TCP 桥接**没有身份验证和加密**。原版的命名管道天然仅限本机访问，提供了隐式访问控制。使用 TCP 后，端口可通过网络访问。**仅在可信网络（VPN、局域网）中暴露。绝不要将端口 17171 开放到公共互联网。**
+
+---
+
+## 项目功能
+
+将 AI 代理（Claude、Cursor、Copilot、Codex）通过模型上下文协议（MCP）连接到 Cheat Engine。AI 可以读写内存、扫描数值、设置硬件断点、反汇编函数、注入代码，以及对任何附加进程执行约 180 种操作——全部通过自然语言完成。
+
+```
+你："扫描金币：15000"           →  AI 找到 47 个结果
+你："金币变成了 15100"          →  AI 过滤到 3 个地址
+你："什么写入了第一个？"         →  AI 设置硬件断点
+你："反汇编那个函数"            →  完整的 AddGold 逻辑呈现
+```
 
 ---
 
@@ -91,128 +91,64 @@ TCP 模式使用原生 C DLL（`ce_mcp_tcp_x64.dll` / `ce_mcp_tcp_x86.dll`），
 
 | 条件 | 版本 | 说明 |
 |------|------|------|
-| **Python** | 3.10+ | MCP 服务器运行所需 |
-| **Cheat Engine** | 7.5+ | 推荐 7.6；DBVM 功能需要 DBVM 版本的 CE |
-| **原生 TCP DLL** | v2.0.0 | 将 `ce_mcp_tcp_x64.dll` 或 `ce_mcp_tcp_x86.dll` 放在 CE 可执行文件目录 |
-| **pip 包 `mcp`** | 最新版 | `pip install mcp` |
-| **Git** | 任意版本 | 用于克隆仓库 |
+| Python | 3.10+ | MCP 服务器运行环境 |
+| Cheat Engine | 7.5+ | 推荐 7.6；DBVM 功能需要 DBVM 版本 |
+| 原生 TCP DLL | v2.0.0 | `ce_mcp_tcp_x64.dll` 或 `_x86.dll`——须匹配 CE 架构 |
+| pip 包 `mcp` | 最新版 | `pip install mcp` |
 
-> [!NOTE]
-> `pywin32` 仅在使用旧版命名管道（Pipe）模式时需要。TCP 模式（默认）除了 `mcp` 之外没有额外 Python 依赖。
+> `pywin32` 仅在使用旧版命名管道模式（`CE_TRANSPORT=pipe`）时需要。TCP 模式（默认）无额外依赖。
 
 ---
 
-## 安装
+## 安装配置
 
-### 第一步：克隆仓库
+### 1. 克隆与安装
 
 ```bash
 git clone https://github.com/HollyZoe/cheatengine-mcp-tcp-bridge.git
 cd cheatengine-mcp-tcp-bridge
-```
-
-### 第二步：安装 Python 依赖
-
-```bash
 pip install -r MCP_Server/requirements.txt
 ```
 
-或手动安装：
+### 2. 放置 DLL
 
-```bash
-pip install mcp
-```
-
-> [!TIP]
-> 建议使用虚拟环境：
-> ```bash
-> python -m venv venv
-> venv\Scripts\activate      # Windows
-> source venv/bin/activate   # Linux/macOS
-> pip install -r MCP_Server/requirements.txt
-> ```
-
-### 第三步：将原生 TCP DLL 放入 Cheat Engine 目录
-
-从 `MCP_Server/` 复制与 CE 架构匹配的 DLL 到 **Cheat Engine 可执行文件所在目录**（例如 `cheatengine-x86_64.exe` 所在文件夹）：
+将架构匹配的 DLL 复制到 **Cheat Engine 可执行文件目录**：
 
 | CE 版本 | 需复制的 DLL |
 |---------|-------------|
 | 64 位 | `ce_mcp_tcp_x64.dll` |
 | 32 位 | `ce_mcp_tcp_x86.dll` |
 
-示例（64 位 CE 安装在 `C:\CE 7.5`）：
+来源：`MCP_Server/` 或 `NativeBridge/bin/x64/`、`NativeBridge/bin/x86/`。
 
 ```
 C:\CE 7.5\cheatengine-x86_64.exe
-C:\CE 7.5\ce_mcp_tcp_x64.dll    ← 复制到此
+C:\CE 7.5\ce_mcp_tcp_x64.dll    ← 放在这里
 ```
 
-预编译二进制文件也可在 `NativeBridge/bin/x64/` 和 `NativeBridge/bin/x86/` 中找到（若从源码重新编译）。
+### 3. 在 Cheat Engine 中加载
 
----
+1. 将 CE 附加到目标进程。
+2. 加载桥接脚本：
+   - **推荐：** `File` → `Execute Script` → 打开 `MCP_Server/ce_mcp_bridge.lua` → `Execute`
+   - **备选：** `Table` → `Show Cheat Table Lua Script` → 粘贴执行：
+     ```lua
+     dofile([[C:\path\to\cheatengine-mcp-tcp-bridge\MCP_Server\ce_mcp_bridge.lua]])
+     ```
 
-## 快速开始
-
-### 第一步：在 Cheat Engine 中附加目标进程
-
-1. 打开 Cheat Engine。
-2. 点击左上角的 **电脑图标** 打开进程列表。
-3. 选择并附加到你的目标进程（如游戏或应用程序）。
-4. *（可选）* 如需使用 DBVM 工具（硬件断点、Ring -1 追踪），请启用 DBVM：`DBVM` → `Enable DBVM`。
-
-### 第二步：加载 MCP Bridge 脚本
-
-有两种加载方式：
-
-**方式 A — Execute Script（推荐）**
-1. 在 Cheat Engine 中：`File` → `Execute Script`
-2. 浏览并打开 `MCP_Server/ce_mcp_bridge.lua`
-3. 点击 `Execute`
-
-**方式 B — Cheat Table Script（备选）**
-1. 在 Cheat Engine 中：`Table` → `Show Cheat Table Lua Script`
-2. 粘贴以下代码（将路径替换为你的实际路径）：
-
-```lua
-dofile([[C:\path\to\cheatengine-mcp-tcp-bridge\MCP_Server\ce_mcp_bridge.lua]])
+预期输出：
 ```
-
-3. 点击 `Execute`
-
-**Cheat Engine 的 Lua 输出窗口中应显示：**
-```
-[MCP] CE path: C:\path\to\CE 7.5
 [MCP] CE x64 - loading ce_mcp_tcp_x64.dll
-[MCP] DLL loaded OK from: C:\path\to\CE 7.5\ce_mcp_tcp_x64.dll
-[MCP] Bridge started on port 17171 (native mode) - you can close this window now.
+[MCP] DLL loaded OK from: C:\CE 7.5\ce_mcp_tcp_x64.dll
+[MCP] Bridge started on port 17171 (native TCP, 1ms poll)
 ```
 
-同时会打开 **独立的 DLL 调试控制台**，输出诊断信息：
-```
-[MCP-DLL] ce_mcp_tcp.dll loaded (v2.0.0)
-[MCP-DLL] luaopen_ce_mcp_tcp called
-[MCP-DLL] Resolving Lua API (17 functions)...
-[MCP-DLL] Found module: lua53-64.dll
-[MCP-DLL]   lua53-64.dll => 17/17 functions
-[MCP-DLL] Native mode: 5 Lua functions registered
-[MCP-DLL] mcp_tcp_start called
-[MCP-DLL] TCP server thread started
-[MCP-DLL] Listening on 0.0.0.0:17171 (mode: Lua API)
-```
-
-> [!TIP]
-> 若 DLL 缺失，Lua 输出会提示加载失败 — 请参阅 [故障排除](#故障排除)。运行脚本前请将 `ce_mcp_tcp_x64.dll`（或 `_x86.dll`）放在 CE 可执行文件旁。
-
-### 第三步：配置 AI 客户端
-
-选择你使用的 AI 客户端，添加 MCP 服务器配置。
+### 4. 配置 AI 客户端
 
 <details>
 <summary><b>Cursor IDE</b></summary>
 
-在项目目录的 `.cursor/mcp.json`（或全局 `~/.cursor/mcp.json`）中添加：
-
+`.cursor/mcp.json`：
 ```json
 {
   "mcpServers": {
@@ -228,16 +164,13 @@ dofile([[C:\path\to\cheatengine-mcp-tcp-bridge\MCP_Server\ce_mcp_bridge.lua]])
   }
 }
 ```
-
-保存后**重启 Cursor**（或在设置中重新加载 MCP 服务器）以应用配置。
-
+保存后重启 Cursor。
 </details>
 
 <details>
 <summary><b>Claude Desktop</b></summary>
 
-在 `%APPDATA%\Claude\claude_desktop_config.json`（Windows）或 `~/Library/Application Support/Claude/claude_desktop_config.json`（macOS）中添加：
-
+`%APPDATA%\Claude\claude_desktop_config.json`：
 ```json
 {
   "mcpServers": {
@@ -253,167 +186,108 @@ dofile([[C:\path\to\cheatengine-mcp-tcp-bridge\MCP_Server\ce_mcp_bridge.lua]])
   }
 }
 ```
-
-保存后重启 Claude Desktop。
-
 </details>
 
 <details>
 <summary><b>Codex CLI</b></summary>
 
-在 `~/.codex/config.toml` 中添加：
-
+`~/.codex/config.toml`：
 ```toml
 [mcp_servers.cheatengine]
 command = "python"
 args = ['C:\path\to\cheatengine-mcp-tcp-bridge\MCP_Server\mcp_cheatengine.py']
 ```
-
-Windows 路径使用单引号，TOML 会将反斜杠视为普通字符。
-
 </details>
 
 <details>
-<summary><b>远程 Cheat Engine（不同机器）</b></summary>
+<summary><b>远程 Cheat Engine</b></summary>
 
-将 `CE_HOST` 改为远程机器的 IP 地址：
-
+将 `CE_HOST` 设为远程 IP：
 ```json
 {
   "env": {
-    "CE_TRANSPORT": "tcp",
     "CE_HOST": "192.168.1.100",
     "CE_PORT": "17171"
   }
 }
 ```
 
-**在 CE 所在机器上配置防火墙：**
-
+CE 所在机器防火墙：
 ```powershell
-# Windows 防火墙 — 允许 TCP 17171 入站
 netsh advfirewall firewall add rule name="CE MCP Bridge" dir=in action=allow protocol=TCP localport=17171
-
-# Linux（如适用）
-sudo ufw allow 17171/tcp
 ```
-
-> [!CAUTION]
-> TCP Bridge **没有身份验证**。仅在可信网络（VPN、局域网）中暴露该端口。绝不要将端口 17171 开放到公共互联网。
-
 </details>
 
-### 第四步：验证连接
+### 5. 验证连接
 
-在 AI 对话框中，让 AI 验证连接。它会自动调用 `ping` 工具：
+对 AI 说：*"Ping 一下 Cheat Engine"*
 
-```
-你："Ping 一下 Cheat Engine"
-```
-
-预期响应：
 ```json
 {"success": true, "version": "15.0.0", "message": "CE MCP Bridge v15.0.0 alive"}
 ```
 
-> [!TIP]
-> - ping 响应中的 `process_id: 0` 是**正常的** — 表示 CE 尚未附加目标进程，或 CE 窗口处于空闲状态。
-> - 如果连接失败，请参考下方的 [故障排除](#故障排除) 章节。
-
-### 第五步：开始使用
-
-现在你可以与 AI 对话，它会通过 Cheat Engine 与目标进程交互：
-
-```
-你："当前附加了什么进程？"
-你："读取主模块基地址处的 16 个字节"
-你："反汇编主模块的入口点"
-你："扫描整数值 99999"
-你："[[game.exe+0x1234]+0x10] 处的 RTTI 类名是什么？"
-```
-
 ---
 
-## 约 180 个 MCP 工具
+## 可用工具（约 180 个）
 
 ### 内存操作
 | 工具 | 说明 |
 |------|------|
 | `read_memory`, `read_integer`, `read_string` | 读取任意数据类型 |
-| `read_pointer_chain` | 跟踪指针链 `[[base+0x10]+0x20]` |
-| `scan_all`, `aob_scan` | 搜索值和字节特征码 |
+| `write_memory`, `write_integer`, `write_string` | 写入内存值 |
+| `read_pointer_chain` | 跟踪多级指针链 `[[base+0x10]+0x20]` |
+| `scan_all`, `next_scan`, `aob_scan` | 数值扫描和 AOB 特征码匹配 |
+| `allocate_memory`, `free_memory` | 在目标进程中分配/释放内存 |
 
-### 分析
+### 代码分析
 | 工具 | 说明 |
 |------|------|
-| `disassemble`, `analyze_function` | 代码分析 |
-| `dissect_structure` | 自动检测字段和类型 |
-| `get_rtti_classname` | 识别 C++ 对象类型 |
-| `find_references`, `find_call_references` | 交叉引用 |
+| `disassemble` | 反汇编指定地址的指令 |
+| `analyze_function` | 查找函数内所有 CALL 指令 |
+| `find_function_boundaries` | 检测函数起止地址 |
+| `dissect_structure` | 自动检测结构体字段和类型 |
+| `get_rtti_classname` | 通过 RTTI 识别 C++ 对象类型 |
+| `find_references` | 查找引用某地址的指令 |
 
 ### 调试
 | 工具 | 说明 |
 |------|------|
-| `set_breakpoint`, `set_data_breakpoint` | 硬件断点 |
-| `start_dbvm_watch` | Ring -1 隐形追踪 |
-
-### 进程生命周期
-| 工具 | 说明 |
-|------|------|
-| `open_process`, `get_process_list` | 附加或枚举进程 |
-| `create_process` | 在 CE 控制下启动新进程 |
-| `pause_process`, `unpause_process` | 暂停/恢复目标执行 |
-
-### 内存分配
-| 工具 | 说明 |
-|------|------|
-| `allocate_memory`, `free_memory` | 在目标进程中分配/释放内存 |
-| `set_memory_protection`, `full_access` | 调整页面保护标志 |
+| `set_breakpoint`, `set_data_breakpoint` | 硬件断点（DR0–DR3） |
+| `start_dbvm_watch` | 通过 DBVM 实现 Ring -1 隐形追踪 |
+| `get_breakpoint_hits` | 获取捕获的寄存器/栈数据 |
 
 ### 代码注入
 | 工具 | 说明 |
 |------|------|
+| `auto_assemble` | 执行 CE 自动汇编器脚本 |
 | `inject_dll` | 向目标进程注入 DLL |
-| `execute_code`, `execute_method` | 远程执行 shellcode 或 CE Lua 方法 |
-
-### 符号管理
-| 工具 | 说明 |
-|------|------|
-| `register_symbol`, `get_symbol_info` | 创建和查询命名符号 |
-| `enable_windows_symbols` | 启用 PDB 符号解析 |
-
-### 汇编/编译
-| 工具 | 说明 |
-|------|------|
-| `assemble_instruction` | 将单条 x86/x64 指令汇编为字节 |
+| `execute_code`, `execute_method` | 远程执行 shellcode 或调用方法 |
 | `compile_c_code` | 编译 C 源码为可注入的 shellcode |
-| `generate_api_hook_script` | 生成 CE 自动汇编器 API 钩子模板 |
 
-### 窗口/GUI 自动化
+### 进程与模块
 | 工具 | 说明 |
 |------|------|
-| `find_window` | 按标题或类名查找窗口 |
-| `send_window_message` | 向目标窗口发送 `WM_*` 消息 |
-
-### 输入自动化
-| 工具 | 说明 |
-|------|------|
-| `get_pixel` | 采样屏幕坐标处的像素颜色 |
-| `is_key_pressed`, `do_key_press` | 查询和模拟键盘输入 |
-
-### 作弊表
-| 工具 | 说明 |
-|------|------|
-| `load_table`, `save_table` | 加载/保存 `.CT` 作弊表文件 |
-| `get_address_list` | 枚举活动作弊表中的条目 |
+| `get_process_info`, `get_process_list` | 进程枚举与信息 |
+| `open_process`, `create_process` | 附加或启动进程 |
+| `enum_modules`, `get_symbol_address` | 模块和符号解析 |
 
 ### 内核模式（DBK / DBVM）
 | 工具 | 说明 |
 |------|------|
-| `dbk_get_cr3` | 读取目标进程的 CR3 寄存器 |
+| `dbk_get_cr3`, `dbk_get_cr0` | 读取控制寄存器 |
 | `read_process_memory_cr3` | 通过 CR3 绕过读取物理内存 |
+| `get_physical_address` | 虚拟地址到物理地址转换 |
 
-完整工具列表见 `AI_Context/MCP_Bridge_Command_Reference.md`
+### 其他分类
+- **符号管理**：`register_symbol`、`get_symbol_info`、`enable_windows_symbols`
+- **汇编**：`assemble_instruction`、`generate_api_hook_script`
+- **GUI 自动化**：`find_window`、`send_window_message`
+- **输入**：`get_pixel`、`is_key_pressed`、`do_key_press`、`set_mouse_pos`
+- **作弊表**：`load_table`、`save_table`、`get_address_list`、`create_memory_record`
+- **文件/系统**：`file_exists`、`run_command`、`shell_execute`
+- **结构体**：`create_structure`、`add_element_to_structure`、`export_structure_to_xml`
+
+完整参考：`AI_Context/MCP_Bridge_Command_Reference.md`
 
 ---
 
@@ -421,291 +295,186 @@ sudo ufw allow 17171/tcp
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `CE_TRANSPORT` | `tcp` | 传输模式：`tcp`（推荐）或 `pipe`（旧版/已弃用） |
-| `CE_HOST` | `127.0.0.1` | Cheat Engine 实例的 TCP 主机地址。远程调试时设为远程 IP |
-| `CE_PORT` | `17171` | TCP 基础端口。DLL 在端口被占用时自动递增 |
-| `CE_PORT_RANGE` | `10` | 从 `CE_PORT` 开始扫描的端口数量。Python 客户端会逐个尝试并通过 `ping` 验证 |
-| `CE_MCP_TIMEOUT` | `90` | 每次 MCP 工具调用的超时时间（秒）。设为 `0` 禁用 |
-| `CE_MCP_ALLOW_SHELL` | *未设置* | 设为 `1` 启用 `run_command` / `shell_execute` 工具。**存在任意代码执行风险**——默认不设置 |
+| `CE_TRANSPORT` | `tcp` | `tcp`（推荐）或 `pipe`（旧版，需 pywin32） |
+| `CE_HOST` | `127.0.0.1` | CE 实例 IP。远程调试时设为远程 IP |
+| `CE_PORT` | `17171` | 基础 TCP 端口。DLL 在端口被占用时自动递增 |
+| `CE_PORT_RANGE` | `10` | 从 `CE_PORT` 起扫描的端口数量 |
+| `CE_MCP_TIMEOUT` | `90` | 每个工具调用超时（秒）。`0` = 不超时 |
+| `CE_MCP_ALLOW_SHELL` | *(未设置)* | 设为 `1` 启用 `run_command`/`shell_execute`。有安全风险 |
 
 ---
 
-## TCP 架构详解
+## 技术架构
 
-### 原生 TCP 桥接 DLL（`ce_mcp_tcp_x64.dll` / `ce_mcp_tcp_x86.dll`）
+### 原生 TCP DLL (`ce_mcp_tcp.c`)
 
-编译的 C DLL（v2.0.0）负责所有 TCP 通信，取代了此前 Lua 中的 Winsock FFI 实现。
+DLL（编译的 C 代码，静态 CRT）由 CE Lua 通过 `package.loadlib` 加载：
 
-| 方面 | 说明 |
-|------|------|
-| **加载方式** | Lua 通过 `package.loadlib` 从 CE 可执行文件目录加载 DLL |
-| **Lua API** | DLL 动态解析 CE 目录中 `lua53-64.dll`（或类似模块）的 17 个 Lua C API 函数 |
-| **注册的函数** | `mcp_tcp_start`、`mcp_tcp_stop`、`mcp_tcp_poll`、`mcp_tcp_respond`、`mcp_tcp_status` |
-| **编译** | 使用 `/MT`（静态 CRT）— 无需安装 Visual C++ 运行库 |
-| **日志** | 打开独立的调试控制台窗口（`[MCP-DLL]` 前缀） |
-| **回退** | 无法解析 Lua API 时使用文件 IPC 模式（详见 DLL 调试控制台） |
+1. 动态解析 CE 的 `lua53-64.dll` 中的 17 个 Lua C API 函数
+2. 注册 5 个全局 Lua 函数：`mcp_tcp_start/stop/poll/respond/status`
+3. 运行专用 TCP 服务端线程（Winsock2 + `select()`）
+4. 绑定 `0.0.0.0:17171`，端口忙时自动递增
+5. 将传入的 JSON-RPC 请求入队，Lua 通过 `mcp_tcp_poll()` 出队
+6. 通过 `mcp_tcp_respond()` 发送响应，使用 4 字节小端序长度前缀帧
 
-**DLL TCP 服务端流程：**
+### 线路协议
 
-1. **绑定与监听** — 绑定 `0.0.0.0:17171`（端口忙时自动递增），TCP 服务端线程使用 Winsock2 + `select()`。
-2. **接受与接收** — 一次接受一个客户端，接收带帧的 JSON-RPC 请求。
-3. **入队给 Lua** — 传入命令入队；Lua 的 10ms 定时器调用 `mcp_tcp_poll` 出队。
-4. **主线程执行** — Lua 命令处理器执行 CE API 调用（与之前相同的约 180 个工具）。
-5. **响应** — Lua 调用 `mcp_tcp_respond` 返回 JSON 结果；DLL 发送带长度前缀的 UTF-8 载荷。
-6. **帧协议** — 4 字节小端序长度前缀 + UTF-8 JSON-RPC 数据（与 v14 相同）。
+TCP 和旧版管道使用相同的帧格式：
 
-### CE Lua 桥接（`ce_mcp_bridge.lua`）
-
-Lua 脚本现为轻量加载器与命令分发器（已删除约 1000 行废弃的 FFI/Winsock/Pipe 代码）：
-
-1. 解析 CE 安装路径并加载对应架构的 DLL。
-2. 调用 `mcp_tcp_start(port)` 启动原生 TCP 服务器。
-3. 创建 **10ms 定时器**，轮询 `mcp_tcp_poll`、分发命令并调用 `mcp_tcp_respond`。
-4. 无 Winsock FFI、无 kernel32 引导、不依赖 `getAddressSafe`。
-
-### Python 客户端（`mcp_cheatengine.py`）
-
-- **端口扫描** — 尝试 `CE_PORT` 到 `CE_PORT + CE_PORT_RANGE - 1` 的端口，通过 `ping` 命令验证是否为 CE Bridge（而非其他服务）。
-- **自动重连** — 连接断开后，下一条命令会自动重连。
-- **线程安全** — `threading.Lock()` 序列化来自 MCP 框架的并发工具调用。
-- **超时保护** — 可配置的每次调用超时，自动清理 Socket。
-
-### 端口自动递增
-
-若默认端口（17171）被占用，**DLL** 会自动递增（与 v14 行为相同，现由原生代码实现）：
-
-| 场景 | CE 服务端端口 | Python 客户端行为 |
-|------|-------------|------------------|
-| 单个 CE 实例 | 17171 | 直接连接 |
-| 端口 17171 被占用 | 17172 | 扫描 17171-17180，找到 CE 后连接 |
-| 两个 CE 实例 | 17171, 17172 | 连接到首个找到的 CE Bridge |
-
----
-
-## 远程 Cheat Engine 配置
-
-在另一台机器上控制 Cheat Engine 实例：
-
-1. **网络** — 确保 TCP 端口 17171 可达（防火墙、VPN 等）。
-2. **CE 端** — 将 DLL 复制到远程 CE 目录，然后执行 `ce_mcp_bridge.lua`。服务器默认绑定到 `0.0.0.0`（所有网络接口）。
-3. **Cursor 端** — 将 `CE_HOST` 设为远程机器的 IP：
-
-```json
-{
-  "env": {
-    "CE_HOST": "10.0.0.50",
-    "CE_PORT": "17171"
-  }
-}
+```
+[4 字节：载荷长度，小端序 uint32] [N 字节：UTF-8 JSON-RPC]
 ```
 
-4. **验证** — 使用 `ping` 工具。成功响应表示 Bridge 运行正常。
+### Python 客户端行为
 
-> [!CAUTION]
-> TCP Bridge 没有身份验证。仅在可信网络（VPN、局域网）中使用。不要将端口 17171 暴露到公共互联网。
+- 自动扫描 17171–17180 端口，通过 `ping` 验证每个端口
+- 失败时 3 次自动重试 + 自动重连
+- 通过 `threading.Lock()` 保证线程安全
+- 可配置超时，自动清理 Socket
 
 ---
 
 ## 重要配置
 
-### 防止蓝屏
-> [!CAUTION]
-> **必须禁用：** Cheat Engine → Settings → Extra → **"Query memory region routines"**
-> 
-> 启用该选项：当与 DBVM/反作弊系统扫描保护页面时，会导致 `CLOCK_WATCHDOG_TIMEOUT` 蓝屏。
-
-### 已知工具限制
-
-部分 CE API 函数在接收无效输入时可能导致访问违规（CE 崩溃）。这些是 CE 内部问题，而非 Bridge 的 Bug：
-
-| 工具 | 风险 | 缓解措施 |
-|------|------|---------|
-| `get_rtti_classname` | 地址不指向 C++ vtable 时崩溃 | 仅在已知 C++ 对象地址上使用 |
-| `aob_scan`（超大范围） | 全进程扫描可能超时 | 使用 `aob_scan_module` 限制范围 |
-| 对 explorer.exe 的高负载操作 | 大量响应数据可能导致超时 | 优先使用针对性扫描而非全量枚举 |
+> **防止蓝屏**：**必须**禁用 Cheat Engine → Settings → Extra → **"Query memory region routines"**。启用时，对 DBVM 保护页面的内存扫描会触发 `CLOCK_WATCHDOG_TIMEOUT` 蓝屏。
 
 ---
 
 ## 故障排除
 
-### Cheat Engine 报错 "too many local variables"
-
-使用 `dofile(...)` 从磁盘加载 Bridge，而不是将完整脚本粘贴到作弊表脚本中。Bridge 将命令处理函数声明为全局函数，以避免在一次编译整个 Bridge 时触发 CE Lua 的 200 个局部变量限制。
-
-### DLL 未找到或加载失败
-
-1. 将 `ce_mcp_tcp_x64.dll`（64 位 CE）或 `ce_mcp_tcp_x86.dll`（32 位 CE）复制到 **`cheatengine-x86_64.exe`（或你的 CE 可执行文件）所在目录**。
-2. 本仓库 `MCP_Server/` 中附带预编译副本。
-3. CE Lua 输出应显示 `DLL loaded OK from: ...` — 否则请检查路径与架构是否匹配（x64 CE 需要 `_x64.dll`）。
-
-### Lua API 解析失败
-
-1. 打开 **DLL 调试控制台**（Bridge 启动时自动打开）。
-2. 查找类似 `Found module: lua53-64.dll` 和 `17/17 functions` 的行。
-3. 若解析失败，DLL 可能回退到文件 IPC 模式 — 详情见该控制台日志。
-4. 请使用 CE 7.5+ 及标准 Lua 5.3 构建版本。
-
-### MCP 客户端无法连接（TCP 模式）
-
-按以下顺序检查：
-
-1. CE Lua 输出显示 `Bridge started on port 17171 (native mode)`。
-2. DLL 调试控制台显示 `Listening on 0.0.0.0:17171`。
-3. 运行 `netstat -an | findstr 17171` 确认端口正在监听。
-4. 使用远程 CE 时，验证网络路由（ping、防火墙、VPN）。
-5. 检查 MCP 配置中的 `CE_HOST` 和 `CE_PORT` 是否匹配。
-6. 修改 `mcp.json` / MCP 配置后重启 IDE。
-7. 使用 `ping` 工具 — CE 未附加目标进程时 `process_id: 0` 是正常的。
-8. **端口被占用** — DLL 会自动递增端口；查看 DLL 控制台中的实际监听端口，必要时调整 `CE_PORT` 或扫描范围。
-
-### MCP 客户端无法连接（Pipe 模式 — 旧版）
-
-1. CE 显示 `MCP Server Listening on: CE_MCP_Bridge_v99`。
-2. 已安装 `pip install pywin32`。
-3. 在 MCP 配置环境中设置 `CE_TRANSPORT=pipe`。
-
-> [!NOTE]
-> Pipe 模式为旧版/已弃用。新部署请使用原生 DLL 的 TCP 模式。
-
-### 高负载操作时连接断开
-
-Python 客户端超时默认为 90 秒。对于超高负载操作（全进程 AOB 扫描、数千个内存区域），请增大 `CE_MCP_TIMEOUT`：
-
-```json
-{
-  "env": {
-    "CE_MCP_TIMEOUT": "180"
-  }
-}
-```
-
-### CE UI 在命令执行期间短暂卡顿
-
-命令处理器通过 Lua 定时器轮询在主线程上运行。短命令（<100ms）几乎无感知。高负载命令（模块扫描、大量内存读取）可能短暂冻结 UI。这是为了保证 API 线程安全的设计。
-
----
-
-## 使用示例
-
-**查找数值：**
-```
-你："扫描金币：15000"  →  AI 找到 47 个结果
-你："金币变成了 15100"  →  AI 过滤到 3 个地址
-你："什么写入了第一个地址？"  →  AI 设置硬件断点
-你："反汇编那个函数"  →  完整的 AddGold 逻辑被揭示
-```
-
-**理解结构体：**
-```
-你："[[game.exe+0x1234]+0x10] 处是什么？"
-AI："RTTI: CPlayerInventory"
-AI："0x00=vtable, 0x08=itemCount(int), 0x10=itemArray(ptr)..."
-```
-
-**远程调试：**
-```
-你："连接到 192.168.1.100 的 CE 并列出模块"
-AI：[通过 TCP 连接] "在 Explorer.EXE 中找到 389 个模块"
-你："反汇编 ntdll.NtQueryInformationProcess"
-AI："mov r10, rcx / mov eax, 0x19 / ..."
-```
+| 问题 | 解决方案 |
+|------|---------|
+| CE 报 "too many local variables" | 用 `dofile(...)` 从磁盘加载，不要粘贴完整脚本 |
+| DLL 未找到 | 将 `ce_mcp_tcp_x64.dll`（或 `_x86.dll`）复制到 CE 可执行文件目录 |
+| Lua API 解析失败 | 检查 DLL 调试控制台的模块检测信息。确保 CE 7.5+ 且为 Lua 5.3 构建 |
+| 无法连接（TCP） | 验证 `netstat -an | findstr 17171`、检查 CE_HOST/CE_PORT、重启 IDE |
+| 无法连接（Pipe/旧版） | `pip install pywin32`，设置 `CE_TRANSPORT=pipe`，确认 CE 输出中的管道名 |
+| 高负载操作超时 | 增大 `CE_MCP_TIMEOUT`（如 `180`） |
+| CE UI 在命令执行时卡顿 | 正常现象——处理器在 CE 主线程运行以保证 API 安全 |
 
 ---
 
 ## 项目结构
 
 ```
-CLAUDE.md                               # Claude Code agent 指导文件
-README.md                               # 英文文档
-README_CN.md                            # 中文文档
-
-NativeBridge/
-├── ce_mcp_tcp.c                        # 原生 TCP 桥接 DLL 源码
-├── build.bat                           # 编译脚本（需要 VS Build Tools）
-├── bin/x64/ce_mcp_tcp_x64.dll         # 预编译 64 位 DLL
-└── bin/x86/ce_mcp_tcp_x86.dll         # 预编译 32 位 DLL
+README.md / README_CN.md          文档（英/中）
+CLAUDE.md / AGENTS.md             AI 代理编码指南
 
 MCP_Server/
-├── mcp_cheatengine.py                  # Python MCP 服务器
-├── ce_mcp_bridge.lua                   # CE Lua 桥接（DLL 加载器 + 命令处理）
-├── ce_mcp_tcp_x64.dll                  # 预编译 64 位 DLL（便于复制）
-├── ce_mcp_tcp_x86.dll                  # 预编译 32 位 DLL（便于复制）
-├── requirements.txt                    # Python 依赖
-└── test_mcp.py                         # 测试套件
+├── mcp_cheatengine.py            Python MCP 服务器（约 2350 行）
+├── ce_mcp_bridge.lua             CE Lua 桥接（约 5700 行）
+├── ce_mcp_tcp_x64.dll            预编译 64 位原生 TCP DLL
+├── ce_mcp_tcp_x86.dll            预编译 32 位原生 TCP DLL
+├── test_mcp.py                   集成测试套件
+└── requirements.txt              Python 依赖
+
+NativeBridge/
+├── ce_mcp_tcp.c                  DLL 源码（约 770 行）
+├── build.bat                     编译脚本（VS Build Tools）
+└── bin/{x64,x86}/                预编译二进制
 
 AI_Context/
-├── BATCH_WORKER_BRIEFING.md            # 并行工作任务规范
-├── MCP_Bridge_Command_Reference.md     # MCP 命令参考
-├── CE_LUA_Documentation.md             # CheatEngine 7.6 官方文档
-└── AI_Guide_MCP_Server_Implementation.md  # AI Agent 完整技术文档
+├── MCP_Bridge_Command_Reference.md
+├── AI_Guide_MCP_Server_Implementation.md
+├── CE_LUA_Documentation.md
+└── BATCH_WORKER_BRIEFING.md
 ```
 
 ---
 
-## 测试
+## 接口测试结果 (v15.0.0)
 
-运行测试：
-```bash
-python MCP_Server/test_mcp.py
-```
+对所有 161 个已注册的 MCP 工具进行了完整的接口测试。结果汇总：
 
-预期输出：
-```
-✅ Memory Reading: 6/6 tests passed
-✅ Process Info: 4/4 tests passed  
-✅ Code Analysis: 8/8 tests passed
-✅ Breakpoints: 4/4 tests passed
-✅ DBVM Functions: 3/3 tests passed
-✅ Utility Commands: 11/11 tests passed
-⏭️ Skipped: 1 test (generate_signature)
-────────────────────────────────────
-Total: 36/37 PASSED (100% success)
-```
+| 类别 | 结果 | 数量 |
+|------|------|------|
+| **通过** | 所有操作返回预期结果 | **110+** |
+| **测试中修复** | 发现并修补的 Bug | **3** |
+| **CE 环境限制** | 当前 CE 版本不支持的函数 | **5** |
+| **需要内核驱动** | 已跳过（需要签名驱动 / DBVM） | **约 20** |
+| **危险操作（需正确参数）** | 功能正常但传入无效地址会导致 CE 崩溃 | **3** |
+
+### 测试中修复的 Bug
+
+| 工具 | 问题 | 修复方案 |
+|------|------|---------|
+| `get_memory_protection` | 调用了不存在的 `getMemoryProtection()` CE 函数 | 改用 `enumMemoryRegions()` 遍历内存区域查找包含地址的区域 |
+| `get_memory_regions` | 同一根因——返回 0 个区域 | 改用 `enumMemoryRegions()` 实现，现在返回所有已提交的内存区域并支持分页 |
+| `debug_get_current_debugger_interface` | 无安全检查就调用 `debug_getCurrentDebuggerInterface()`，导致 CE 崩溃 | 添加 nil 检查和 `debug_isDebugging()` 前置判断 |
+
+### CE 环境限制（非 Bug）
+
+| 工具 | 原因 |
+|------|------|
+| `compile_c_code` | TCC 编译器库（`tcc64-64.dll`）未安装 |
+| `compile_cs_code` | .NET 编译器不可用（`compileCS` 返回 nil） |
+| `load_new_symbols` | 当前 CE 版本不存在 `loadNewSymbols` 函数 |
+| `pointer_rescan` | 当前 CE 版本不存在 `pointerRescan` 函数 |
+| `inject_dotnet_dll` | 不存在 `injectDotNetDLL` 函数 |
+
+### 按类别的测试详情
+
+<details>
+<summary><b>点击展开各类别完整测试结果</b></summary>
+
+| 类别 | 测试通过的工具 |
+|------|--------------|
+| **基础连接** | `ping`, `get_process_info`, `get_opened_process_id`, `get_opened_process_handle`, `get_processid_from_name`, `get_foreground_process` |
+| **进程管理** | `open_process`, `get_process_list`, `create_process`, `get_thread_list`, `pause_process`, `unpause_process` |
+| **模块/符号** | `enum_modules`, `get_module_size`, `get_symbol_address`, `get_symbol_info`, `enum_registered_symbols`, `register_symbol`, `unregister_symbol`, `delete_all_registered_symbols`, `reinitialize_symbol_handler`, `enable_kernel_symbols`, `enable_windows_symbols` |
+| **内存信息** | `get_memory_regions`, `get_memory_protection`, `enum_memory_regions_full`, `get_instruction_info` |
+| **内存读取** | `read_memory`, `read_integer`, `read_string`, `read_pointer`, `read_pointer_chain` |
+| **内存写入** | `write_memory`, `write_integer`, `write_string` |
+| **内存管理** | `allocate_memory`, `free_memory`, `allocate_shared_memory`, `set_memory_protection`, `full_access`, `checksum_memory`, `md5_memory`, `compare_memory`, `copy_memory`, `map_memory`, `unmap_memory`, `create_section` |
+| **扫描** | `aob_scan`, `aob_scan_module`, `aob_scan_module_unique`, `aob_scan_unique`, `search_string`, `scan_all`, `next_scan`, `get_scan_results` |
+| **持久扫描** | `create_persistent_scan`, `persistent_scan_first_scan`, `persistent_scan_next_scan`, `persistent_scan_get_results`, `persistent_scan_destroy` |
+| **分析** | `disassemble`, `assemble_instruction`, `auto_assemble`, `auto_assemble_check`, `analyze_function`, `find_function_boundaries`, `find_references`, `find_call_references`, `get_address_info`, `get_rtti_classname`, `generate_signature`, `dissect_structure`, `generate_code_injection_script`, `generate_api_hook_script` |
+| **结构体** | `create_structure`, `get_structure_by_name`, `add_element_to_structure`, `get_structure_elements`, `export_structure_to_xml`, `delete_structure` |
+| **内存记录** | `create_memory_record`, `get_memory_record`, `get_memory_record_value`, `set_memory_record_value`, `delete_memory_record`, `get_address_list` |
+| **调试（安全）** | `list_breakpoints`, `clear_all_breakpoints`, `debug_is_debugging`, `debug_get_current_debugger_interface` |
+| **Lua/脚本** | `evaluate_lua`, `execute_code`, `execute_code_ex`, `create_thread`, `queue_to_main_thread`, `in_main_thread`, `check_synchronize` |
+| **文件操作** | `get_file_list`, `get_directory_list`, `get_file_version`, `file_exists`, `delete_file`, `md5_file`, `get_temp_folder`, `write_region_to_file`, `read_region_from_file`, `save_table`, `load_table` |
+| **GUI/输入** | `show_message`, `speak_text`, `beep`, `play_sound`, `input_query`, `is_key_pressed`, `key_down`, `key_up`, `do_key_press`, `get_mouse_pos`, `set_mouse_pos`, `get_pixel`, `get_screen_info`, `set_progress_state`, `set_progress_value`, `read_clipboard`, `write_clipboard`, `output_debug_string`, `send_window_message` |
+| **变量** | `set_global_variable`, `get_global_variable` |
+| **内核（基础）** | `dbk_get_cr0`, `dbk_get_cr3`, `dbk_get_cr4`, `get_physical_address`, `dbk_writes_ignore_write_protection` |
+
+</details>
 
 ---
 
 ## 更新日志
 
-### v15.0.0
-- **原生 DLL TCP 桥接** — 用编译的 C DLL 替代 Winsock FFI，兼容性最佳
-- **跨 CE 版本支持** — DLL 动态解析任意 CE 构建的 Lua API
-- **Release MT 构建** — 静态 CRT 链接，无需 VC 运行库
-- **架构专用 DLL** — `ce_mcp_tcp_x64.dll` 与 `ce_mcp_tcp_x86.dll`
-- **调试控制台** — DLL 打开独立控制台窗口输出诊断日志
-- **稳健路径解析** — DLL 使用自身目录路径查找 Lua 库
-- **消除 kernel32 FFI 问题** — 不再出现 `getAddressSafe` 或 PEB 遍历失败
-- **精简 Lua 脚本** — 删除约 1000 行废弃的 FFI/Winsock/Pipe 代码
+### v15.0.0 — 原生 DLL TCP 桥接
+- 用编译的 C DLL 替代 Winsock FFI 处理所有 TCP I/O
+- 动态 Lua API 解析（跨 CE 版本兼容）
+- 静态 CRT 链接（`/MT`）——无需 VC 运行库再发行包
+- 架构专用 DLL（`_x64.dll` / `_x86.dll`）
+- 专用 DLL 调试控制台
+- 消除所有 kernel32 FFI 和 PEB 遍历问题
+- 从 Lua 中删除约 1000 行废弃 FFI/Winsock/Pipe 代码
 
-### v14.1.0
-- **TCP 传输**（默认）— CE Lua 中基于 Winsock FFI 的 TCP 服务器，无外部依赖
-- **远程支持** — 通过 `CE_HOST` 连接任意机器上的 CE
-- **端口自动递增** — CE 服务端在端口被占时尝试 17171-17181
-- **客户端端口扫描** — Python 客户端扫描端口范围并通过 `ping` 验证
-- **select() 驱动的 I/O** — 高效的 accept 和 recv 循环，5 秒断连检测
-- **90 秒默认超时** — 从 30 秒提升，适应高负载操作
-- **保留命名管道** — 设置 `CE_TRANSPORT=pipe` 以向后兼容
+### v14.1.0 — TCP 传输
+- CE Lua 中基于 Winsock FFI 的 TCP 服务器（默认传输）
+- 通过 `CE_HOST` 支持远程 CE
+- 端口自动递增（17171–17181）
+- 90 秒默认超时
 
-### v12.0.0
-- 初始公开版本，使用命名管道传输
-- 约 180 个 MCP 工具，覆盖内存、分析、调试等
-
----
-
-## 底线
-
-你不需要成为专家。只需问对问题。
-
-⚠️ 免责声明
-
-本代码仅用于教育和研究目的。它旨在展示模型上下文协议（MCP）和基于 LLM 的调试能力。我不支持将这些工具用于恶意黑客攻击、多人游戏作弊或违反服务条款。这是软件工程自动化的技术演示。
+### v12.0.0 — 初始版本（原版）
+- 命名管道传输 + `pywin32`
+- 约 180 个 MCP 工具
+- 可选 TCP 中继脚本（`ce_tcp_relay.py`）
 
 ---
 
 ## 致谢
 
-本项目是原始 **Cheat Engine MCP Bridge** 的 TCP 增强分支：
+本项目是以下项目的 TCP 增强分支：
 
-- **原始项目**：[miscusi-peek/cheatengine-mcp-bridge](https://github.com/miscusi-peek/cheatengine-mcp-bridge)
-- **原作者**：[@miscusi-peek](https://github.com/miscusi-peek)
+- **原版**：[miscusi-peek/cheatengine-mcp-bridge](https://github.com/miscusi-peek/cheatengine-mcp-bridge)，作者 [@miscusi-peek](https://github.com/miscusi-peek)
+- **贡献者**：[@libangli218](https://github.com/libangli218)、[@lauralex](https://github.com/lauralex)、[@iamtyroon](https://github.com/iamtyroon)
 
-TCP 传输层、远程连接支持、原生 DLL TCP 桥接（v2.0.0）及端口自动递增功能均在本分支中添加。
+---
+
+## 免责声明
+
+本代码仅用于教育和研究目的，旨在展示模型上下文协议（MCP）和基于 LLM 的调试能力。请勿将这些工具用于恶意攻击、多人游戏作弊或违反服务条款。
