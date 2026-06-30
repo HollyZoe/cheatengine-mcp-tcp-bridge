@@ -86,11 +86,31 @@ Key structural differences:
 
 ### 1. Install
 
+**Prerequisites**: Python 3.10+ ([download](https://python.org/downloads/))
+
 ```bash
 git clone https://github.com/HollyZoe/cheatengine-mcp-tcp-bridge.git
 cd cheatengine-mcp-tcp-bridge
 pip install -r MCP_Server/requirements.txt
 ```
+
+This installs the `mcp` SDK package (Model Context Protocol). No `pywin32` needed for TCP transport (default).
+
+**Verify installation**:
+```bash
+python -c "from mcp.server.fastmcp import FastMCP; print('OK')"
+```
+
+If you see `ModuleNotFoundError: No module named 'mcp'`, try:
+```bash
+# Use full path to pip matching your Python
+python -m pip install -r MCP_Server/requirements.txt
+
+# Or install mcp directly
+python -m pip install mcp
+```
+
+> **Note**: If pip warns about scripts not on PATH, you can ignore it — Cursor spawns the MCP server using the `python` command directly.
 
 ### 2. Place DLL
 
@@ -241,6 +261,7 @@ Full testing on all 161 tools (target: Notepad.exe on Windows 10):
 
 | Problem | Solution |
 |---------|----------|
+| `No module named 'mcp'` | Run `python -m pip install mcp` (see [Install](#1-install)) |
 | DLL not found | Copy `ce_mcp_tcp_x64.dll` to CE directory |
 | Cannot connect | Check `netstat -an \| findstr 17171`, verify CE_HOST/CE_PORT |
 | "too many local variables" | Use `dofile(...)` instead of pasting the script |

@@ -86,11 +86,31 @@ AI_Context/             (文档)
 
 ### 1. 安装
 
+**前置要求**：Python 3.10+（[下载](https://python.org/downloads/)）
+
 ```bash
 git clone https://github.com/HollyZoe/cheatengine-mcp-tcp-bridge.git
 cd cheatengine-mcp-tcp-bridge
 pip install -r MCP_Server/requirements.txt
 ```
+
+这会安装 `mcp` SDK 包（Model Context Protocol）。TCP 传输模式（默认）**不需要** `pywin32`。
+
+**验证安装**：
+```bash
+python -c "from mcp.server.fastmcp import FastMCP; print('OK')"
+```
+
+如果出现 `ModuleNotFoundError: No module named 'mcp'`，尝试：
+```bash
+# 使用与你的 Python 版本匹配的 pip
+python -m pip install -r MCP_Server/requirements.txt
+
+# 或直接安装 mcp
+python -m pip install mcp
+```
+
+> **提示**：如果 pip 警告脚本不在 PATH 中，可以忽略 — Cursor 直接通过 `python` 命令启动 MCP 服务器。
 
 ### 2. 放置 DLL
 
@@ -241,6 +261,7 @@ netsh advfirewall firewall add rule name="CE MCP" dir=in action=allow protocol=T
 
 | 问题 | 解决方案 |
 |------|---------|
+| `No module named 'mcp'` | 运行 `python -m pip install mcp`（参见[安装步骤](#1-安装)） |
 | DLL 未找到 | 将 `ce_mcp_tcp_x64.dll` 复制到 CE 目录 |
 | 无法连接 | 检查 `netstat -an \| findstr 17171`，确认 CE_HOST/CE_PORT |
 | "too many local variables" | 用 `dofile(...)` 替代粘贴脚本 |
