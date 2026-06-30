@@ -84,35 +84,43 @@ AI_Context/             (文档)
 
 ## 安装配置
 
-### 1. 安装
-
-**前置要求**：Python 3.10+（[下载](https://python.org/downloads/)）
+### 1. 克隆仓库
 
 ```bash
 git clone https://github.com/HollyZoe/cheatengine-mcp-tcp-bridge.git
 cd cheatengine-mcp-tcp-bridge
+```
+
+### 2. 安装 Python 依赖
+
+**前置要求**：Python 3.10+（[下载](https://python.org/downloads/)）
+
+MCP 服务器需要 `mcp` Python 包（Model Context Protocol SDK）。这**不是 Python 内置模块**，必须手动安装：
+
+```bash
 pip install -r MCP_Server/requirements.txt
 ```
 
-这会安装 `mcp` SDK 包（Model Context Protocol）。TCP 传输模式（默认）**不需要** `pywin32`。
+或直接安装：
+```bash
+pip install mcp
+```
 
-**验证安装**：
+> 如果你有多个 Python 版本，使用 `python -m pip install mcp` 确保安装到正确的环境。
+
+**验证安装是否成功**：
 ```bash
 python -c "from mcp.server.fastmcp import FastMCP; print('OK')"
 ```
 
-如果出现 `ModuleNotFoundError: No module named 'mcp'`，尝试：
-```bash
-# 使用与你的 Python 版本匹配的 pip
-python -m pip install -r MCP_Server/requirements.txt
+如果出现 `ModuleNotFoundError: No module named 'mcp'`，说明安装失败，检查：
+- 你使用的 `python` 是否与 Cursor/AI 客户端使用的是同一个
+- 尝试 `python -m pip install mcp` 而非 `pip install mcp`
+- Windows 上 pip 可能提示脚本不在 PATH 中 — 这没关系，Cursor 直接通过 `python` 命令启动服务器
 
-# 或直接安装 mcp
-python -m pip install mcp
-```
+> **注意**：TCP 传输模式（默认）**不需要** `pywin32`。仅旧版命名管道模式（`CE_TRANSPORT=pipe`）才需要。
 
-> **提示**：如果 pip 警告脚本不在 PATH 中，可以忽略 — Cursor 直接通过 `python` 命令启动 MCP 服务器。
-
-### 2. 放置 DLL
+### 3. 放置 DLL
 
 将 `ce_mcp_tcp_x64.dll`（32 位 CE 用 `_x86.dll`）复制到 **CE 可执行文件目录**：
 
@@ -123,7 +131,7 @@ C:\CE 7.5\ce_mcp_tcp_x64.dll    ← 放这里
 
 DLL 来源：`MCP_Server/` 或 `NativeBridge/bin/`
 
-### 3. 在 CE 中加载
+### 4. 在 CE 中加载
 
 1. 将 CE 附加到目标进程
 2. `File` → `Execute Script` → 打开 `MCP_Server/ce_mcp_bridge.lua` → `Execute`
@@ -140,7 +148,7 @@ dofile([[C:\path\to\MCP_Server\ce_mcp_bridge.lua]])
 [MCP] Bridge started on port 17171 (native TCP, 1ms poll)
 ```
 
-### 4. 配置 AI 客户端
+### 5. 配置 AI 客户端
 
 <details>
 <summary><b>Cursor IDE</b></summary>
@@ -200,7 +208,7 @@ netsh advfirewall firewall add rule name="CE MCP" dir=in action=allow protocol=T
 ```
 </details>
 
-### 5. 验证
+### 6. 验证
 
 对 AI 说：*"Ping 一下 Cheat Engine"*
 

@@ -84,35 +84,43 @@ Key structural differences:
 
 ## Setup
 
-### 1. Install
-
-**Prerequisites**: Python 3.10+ ([download](https://python.org/downloads/))
+### 1. Clone the Repository
 
 ```bash
 git clone https://github.com/HollyZoe/cheatengine-mcp-tcp-bridge.git
 cd cheatengine-mcp-tcp-bridge
+```
+
+### 2. Install Python Dependencies
+
+**Prerequisites**: Python 3.10+ ([download](https://python.org/downloads/))
+
+The MCP server requires the `mcp` Python package (Model Context Protocol SDK). This is **not a built-in module** — you must install it manually:
+
+```bash
 pip install -r MCP_Server/requirements.txt
 ```
 
-This installs the `mcp` SDK package (Model Context Protocol). No `pywin32` needed for TCP transport (default).
+Or install directly:
+```bash
+pip install mcp
+```
 
-**Verify installation**:
+> If you have multiple Python versions, use `python -m pip install mcp` to ensure it installs to the correct environment.
+
+**Verify the installation succeeded**:
 ```bash
 python -c "from mcp.server.fastmcp import FastMCP; print('OK')"
 ```
 
-If you see `ModuleNotFoundError: No module named 'mcp'`, try:
-```bash
-# Use full path to pip matching your Python
-python -m pip install -r MCP_Server/requirements.txt
+If you see `ModuleNotFoundError: No module named 'mcp'`, the install failed — check:
+- You're using the same `python` that Cursor/your AI client will use
+- Try `python -m pip install mcp` instead of just `pip install mcp`
+- On Windows, pip may warn scripts are not on PATH — this is fine, Cursor spawns the server via the `python` command directly
 
-# Or install mcp directly
-python -m pip install mcp
-```
+> **Note**: TCP transport (default) does **not** require `pywin32`. Only legacy Named Pipe transport (`CE_TRANSPORT=pipe`) needs it.
 
-> **Note**: If pip warns about scripts not on PATH, you can ignore it — Cursor spawns the MCP server using the `python` command directly.
-
-### 2. Place DLL
+### 3. Place DLL
 
 Copy `ce_mcp_tcp_x64.dll` (or `_x86.dll` for 32-bit CE) into your **Cheat Engine directory**:
 
@@ -123,7 +131,7 @@ C:\CE 7.5\ce_mcp_tcp_x64.dll    ← here
 
 DLL source: `MCP_Server/` or `NativeBridge/bin/`.
 
-### 3. Load in Cheat Engine
+### 4. Load in Cheat Engine
 
 1. Attach CE to your target process
 2. `File` → `Execute Script` → open `MCP_Server/ce_mcp_bridge.lua` → `Execute`
@@ -140,7 +148,7 @@ Expected output:
 [MCP] Bridge started on port 17171 (native TCP, 1ms poll)
 ```
 
-### 4. Configure AI Client
+### 5. Configure AI Client
 
 <details>
 <summary><b>Cursor IDE</b></summary>
@@ -200,7 +208,7 @@ netsh advfirewall firewall add rule name="CE MCP" dir=in action=allow protocol=T
 ```
 </details>
 
-### 5. Verify
+### 6. Verify
 
 Ask the AI: *"Ping Cheat Engine"*
 
