@@ -3838,9 +3838,16 @@ function cmd_persistent_scan_first_scan(params)
     local scanOpt   = resolveScanOption(scan_option)
 
     local fsOk, fsMsg = pcall(function()
-        ms.firstScan(scanOpt, varType, rtRounded, tostring(value), nil,
-                     0, 0x7FFFFFFFFFFFFFFF, "+W-C", fsmNotAligned, "1",
-                     false, false, false, false)
+        if scanOpt == soValueBetween and value and string.find(value, ";") then
+            local v1, v2 = string.match(value, "^(.-);(.-)$")
+            ms.firstScan(scanOpt, varType, rtRounded, v1, v2,
+                         0, 0x7FFFFFFFFFFFFFFF, "+W-C", fsmNotAligned, "1",
+                         false, false, false, false)
+        else
+            ms.firstScan(scanOpt, varType, rtRounded, tostring(value), nil,
+                         0, 0x7FFFFFFFFFFFFFFF, "+W-C", fsmNotAligned, "1",
+                         false, false, false, false)
+        end
         ms.waitTillDone()
     end)
     if not fsOk then
@@ -3885,7 +3892,10 @@ function cmd_persistent_scan_next_scan(params)
     local scanOpt = resolveScanOption(scan_option)
 
     local nsOk, nsMsg = pcall(function()
-        if scanOpt == soExactValue or scanOpt == soValueBetween or scanOpt == soBiggerThan or scanOpt == soSmallerThan then
+        if scanOpt == soValueBetween and value and string.find(value, ";") then
+            local v1, v2 = string.match(value, "^(.-);(.-)$")
+            ms.nextScan(scanOpt, rtRounded, v1, v2, false, false, false, false, false)
+        elseif scanOpt == soExactValue or scanOpt == soValueBetween or scanOpt == soBiggerThan or scanOpt == soSmallerThan then
             ms.nextScan(scanOpt, rtRounded, tostring(value or ""), nil, false, false, false, false, false)
         else
             ms.nextScan(scanOpt, rtRounded, nil, nil, false, false, false, false, false)
